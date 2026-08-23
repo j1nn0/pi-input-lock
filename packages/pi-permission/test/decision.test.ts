@@ -466,3 +466,25 @@ describe("决策表覆盖补遗（plan/build 分支缺口）", () => {
     expect(d.approvalId).toBe("npm");
   });
 });
+
+describe("父目录软链逃逸端到端（issue #1 缺陷 6 回归）", () => {
+  it("build：写目标经软链父目录落在域外 → FR-3 ask（旧实现静默放行）", () => {
+    const home = os.homedir();
+    const root = fs.mkdtempSync(path.join(home, "pi-permission-symlink-dec-"));
+    const outside = fs.mkdtempSync(path.join(home, "pi-permission-outside-dec-"));
+    try {
+      fs.symlinkSync(outside, path.join(root, "link"));
+      const d = decideBashRequest({
+        mode: "build",
+        config: DEFAULT_CONFIG,
+        cwd: root,
+        command: "echo x > link/newfile",
+      });
+      expect(d.action).toBe("ask");
+      expect(d.rule).toBe("FR-3");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+});

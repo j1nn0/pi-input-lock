@@ -68,7 +68,7 @@ const GIT_OPTION_WITH_VALUE = new Set([
 const WRAPPER_SHELLS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
 
 /** 可剥离的启动器前缀：效果修饰程序，不改变真实程序身份；sudo/su 不剥离（提权本身即危险，走叠加）。 */
-const STRIPPABLE_LAUNCHERS = new Set(["env", "nohup", "setsid", "stdbuf", "command"]);
+const STRIPPABLE_LAUNCHERS = new Set(["env", "nohup", "setsid", "stdbuf", "command", "builtin"]);
 /** 变量赋值前缀（`FOO=bar`）：启动段环境设置，剥离后取真实程序。 */
 const VAR_ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*=/;
 /** 已知只读 git 子命令：不在其中的子命令视为未识别（X），不再假定为只读。 */
@@ -498,7 +498,10 @@ export function classifySegment(segment: BashSegment, config: PermissionConfig):
   }
   if (program === "rm") {
     if (segment.args.some((a) => a.startsWith("-") && /[rf]/.test(a))) return { tier: "X", danger: true, id };
-  } else if ((program === "chmod" || program === "chown") && segment.args.some((a) => a.startsWith("-") && a.includes("R"))) {
+  } else if (
+    (program === "chmod" || program === "chown" || program === "chgrp") &&
+    segment.args.some((a) => a.startsWith("-") && (a.includes("R") || a === "--recursive"))
+  ) {
     return { tier: "X", danger: true, id };
   }
   if (config.dangerousBashCommands.includes(program)) return { tier: "X", danger: true, id };
@@ -632,12 +635,14 @@ export function collectWriteTargets(segment: BashSegment): string[] {
     if (start !== undefined) targets.push(start);
     return targets;
   }
-  // sort -o <file>：输出目标可枚举
+  // sort -o <file>：输出目标可枚举（短选项分立/连写、长选项 =赋值与分立两种形态）
   if (segment.program === "sort") {
     for (let i = 0; i < segment.args.length; i++) {
       const a = segment.args[i]!;
       if (a === "-o" && i + 1 < segment.args.length) targets.push(segment.args[i + 1]!);
       else if (a.startsWith("-o") && a.length > 2) targets.push(a.slice(2));
+      else if (a === "--output" && i + 1 < segment.args.length) targets.push(segment.args[i + 1]!);
+      else if (a.startsWith("--output=" )) targets.push(a.slice("--output=".length));
     }
   }
   // sed 仅在 -i（含 -i.bak 变体）时原位写入；chmod/chown/chgrp 首位是 mode/owner

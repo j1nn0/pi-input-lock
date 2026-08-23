@@ -291,3 +291,26 @@ describe("collectReadRefs / collectWriteTargets", () => {
     expect(collectWriteTargets(parseBashCommand("cat < input.txt").segments[0]!)).toEqual([]);
   });
 });
+describe("classifySegment 补充（issue #1 回归）", () => {
+  const cls = (cmd: string) => classifySegment(parseBashCommand(cmd).segments[0]!, cfg);
+
+  it("builtin 也是执行器前缀：剥离后按真实程序分类", () => {
+    expect(cls("builtin eval ls")).toMatchObject({ tier: "X", danger: true });
+    expect(cls("builtin cat a.txt")).toMatchObject({ tier: "R", danger: false });
+  });
+
+  it("chmod/chown/chgrp --recursive 长格式命中危险叠加", () => {
+    expect(cls("chmod --recursive 777 /")).toMatchObject({ tier: "X", danger: true });
+    expect(cls("chown --recursive x /y")).toMatchObject({ tier: "X", danger: true });
+    expect(cls("chgrp -R g /dir")).toMatchObject({ tier: "X", danger: true });
+    // 非 -R 形态保持 W
+    expect(cls("chmod +x f.sh")).toMatchObject({ tier: "W", danger: false });
+  });
+
+  it("sort 长选项 --output 的两种形态均为写目标", () => {
+    const w1 = collectWriteTargets(parseBashCommand("sort --output=/outside/x in.txt").segments[0]!);
+    expect(w1).toContain("/outside/x");
+    const w2 = collectWriteTargets(parseBashCommand("sort --output /outside/x in.txt").segments[0]!);
+    expect(w2).toContain("/outside/x");
+  });
+});

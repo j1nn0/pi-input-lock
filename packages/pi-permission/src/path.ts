@@ -22,6 +22,20 @@ export function realpathOf(p: string): string | undefined {
   }
 }
 
+/**
+ * 解析最深已存在祖先的真实路径：对尚不存在的文件，逐级解析其已存在的父目录后拼接自身。
+ * 修复「父目录为软链 + 目标文件尚未创建」时的逃逸判定（issue #1 缺陷 6）：
+ * `link/newfile`（link → 项目外）解析为 `<项目外>/newfile`，而非回退到未解析路径。
+ */
+export function realpathDeep(p: string): string | undefined {
+  const real = realpathOf(p);
+  if (real !== undefined) return real;
+  const parent = path.dirname(p);
+  if (parent === p) return undefined;
+  const realParent = realpathDeep(parent);
+  return realParent === undefined ? undefined : path.join(realParent, path.basename(p));
+}
+
 /** 将 glob 模式转为正则：`*` 匹配任意字符（含 `/`），`?` 匹配单个字符。 */
 export function patternToRegExp(pattern: string): RegExp {
   let re = "";
@@ -47,7 +61,8 @@ export function isSensitivePath(
 ): boolean {
   const abs = normalizePath(target, cwd, home);
   const real = realpathOf(abs);
-  const candidates = [abs, real].filter((p): p is string => Boolean(p));
+  const deep = realpathDeep(abs);
+  const candidates = [...new Set([abs, real, deep].filter((p): p is string => Boolean(p)))];
 
   for (const pattern of patterns) {
     const expanded = expandHome(pattern, home);
@@ -103,7 +118,8 @@ export function isSensitiveReadException(target: string, cwd: string, home: stri
  */
 export function isWithinCwd(target: string, cwd: string, home: string): boolean {
   const abs = normalizePath(target, cwd, home);
-  const real = realpathOf(abs) ?? abs;
+  // 深解析：目标不存在时也解析其父目录软链，防止 `link/newfile`（link→域外）被误判为域内
+  const resolved = realpathDeep(abs) ?? abs;
   const realCwd = realpathOf(cwd) ?? cwd;
-  return real === realCwd || real.startsWith(realCwd + path.sep);
+  return resolved === realCwd || resolved.startsWith(realCwd + path.sep);
 }

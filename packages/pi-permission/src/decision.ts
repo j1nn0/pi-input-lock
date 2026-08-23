@@ -9,7 +9,7 @@ import {
   parseBashCommand,
   type BashSegment,
 } from "./bash.ts";
-import { expandHome, isSensitivePath, isSensitiveReadException, isTrustedPath, isWithinCwd, realpathOf } from "./path.ts";
+import { expandHome, isSensitivePath, isSensitiveReadException, isTrustedPath, isWithinCwd, realpathDeep, realpathOf } from "./path.ts";
 
 export type DecisionAction = "allow" | "ask" | "deny";
 
@@ -218,7 +218,7 @@ function resolveSegmentCwds(segments: readonly BashSegment[], initialCwd: string
         current = undefined; // cd - 无法跟踪 → uncertain
       } else if (current !== undefined) {
         const abs = path.resolve(current, expandHome(positional, home()));
-        current = realpathOf(abs) ?? abs;
+        current = realpathDeep(abs) ?? abs;
       }
     }
   }

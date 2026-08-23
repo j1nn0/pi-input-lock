@@ -2,9 +2,10 @@
 
 **English** | [中文](./README.zh-CN.md)
 
-Vim-style reading mode for Pi `fullscreen`: press `alt+o` to enter read-only and auto-expand `transcript` tool outputs, `ctrl-u/d/f/b`, `gg/G`, `j/k` to scroll, plus semantic jumps `[q/a/t`, paragraph `{}` and search `/`/`n`/`N`, exit to restore `emacs` editing and collapsed tools.
+Vim-style reading mode for Pi `fullscreen`: press `alt+o` to enter read-only and auto-expand `transcript` tool outputs, `ctrl-u/d/f/b`, `gg/G`, `j/k` to scroll, plus semantic jumps `[q/a/t`, paragraph `{}` and search `/`/`n`/`N`; your reading position is preserved across mode toggles and manual expand/collapse (prompt-ordinal anchoring), and exit restores `emacs` editing and collapsed tools.
 
-- **Single-key toggle + auto-expand**: `alt+o` (intercepted via `TUI inputListener`, remappable via `toggleKey` in `extensions/pi-reader/config.json`) → `READING` with auto-expanded tool outputs; collapsed state is restored on exit
+- **Single-key toggle + auto-expand**: `alt+o` (intercepted via `TUI inputListener`, remappable via `toggleKey` in `extensions/pi-reader/config.json`) → `READING` with auto-expanded tool outputs; collapsed state is restored on exit. Prefer the tool state untouched? Set `autoExpandTools: false`
+- **Position anchoring**: mode toggles and manual expand/collapse pin the viewport to the Q/A you were reading — anchored in the `OSC133` prompt-ordinal coordinate system (expand/collapse never adds/removes message boundaries, so ordinals are strictly stable); when collapsed content is shorter than one viewport it pins to the last page with the anchored line still on screen
 - **Zero-intrusion editing**: fully passthrough in `INSERT`, keys intercepted only in `READING`; `ctrl+u = deleteToLineStart` by default with zero regressions
 - **Pixel-perfect Pi scrolling**: `half = viewportHeight/2`, `page = viewportHeight-1` (`OVERLAP=1`), matching `TuiAltScreen`
 - **Semantic navigation**: `[q/]q` question, `[a/]a` answer, `[t/]t` tool, `{`/`}` paragraph, `/` search with `n`/`N` (vim-style after `Enter`)
@@ -42,15 +43,15 @@ pi -ne -e ./packages/pi-reader --tui-mode fullscreen
 | **Prev / next paragraph** | `{` / `}` | Blank-line separated; `count` e.g. `2}` |
 | **Search** | `/` then `n` / `N` | `/` enters search input (self-contained, flash echoes the query + `n/m` match count); while typing, every printable key (incl. `j/k/n`) is part of the query; `Enter` commits, `n` next / `N` prev cycle through matches |
 | **Count prefix** | `1-9` (`0` after) | Accumulates up to 4 digits, `800ms` timeout, applies to `j/k`, half/page, `[q/a/t`, `{}` |
-| **Manual expand (edit mode)** | `alt+o` (remappable in `keybindings.json`) | Since `ctrl+o` is taken by reading mode, `app.tools.expand` is rebound to `alt+o` |
+| **Expand / collapse tool output** | `app.tools.expand` (default `ctrl+o`, remappable in `keybindings.json`, e.g. `alt+o`) | **Works in both edit and READING mode**; inside READING its priority is below toggle/exit/help — don't bind it to the same key as `toggleKey` |
 
 ## Configuration
 
 - Reading toggle: `extensions/pi-reader/config.json` (`config.json` is `gitignore`d)
   ```json
-  { "toggleKey": "alt+o", "questionAnchor": "pinTop", "visibleBehavior": "keep", "wrapNavigation": false }
+  { "toggleKey": "alt+o", "autoExpandTools": true, "questionAnchor": "pinTop", "visibleBehavior": "keep", "wrapNavigation": false }
   ```
-  `questionAnchor`: `pinTop` (=1, default) | `third` (=floor(vh/3)) | `center` (=floor(vh/2)) | `number`; `visibleBehavior`: `keep` (default, keep viewport if target already visible, flash only) | `reanchor`; `wrapNavigation`: wrap at ends. `?` popup shows the effective toggle key.
+  `autoExpandTools`: `true` (default) auto expands/collapses tool output on toggle; `false` keeps tool state untouched (position is then naturally lossless). Others: `questionAnchor`: `pinTop` (=1, default) | `third` (=floor(vh/3)) | `center` (=floor(vh/2)) | `number`; `visibleBehavior`: `keep` (default, keep viewport if target already visible, flash only) | `reanchor`; `wrapNavigation`: wrap at ends. `?` popup shows the effective toggle key.
 - Tool expand: `~/.pi/agent/keybindings.json`
   ```json
   { "app.tools.expand": "alt+o" }
@@ -63,6 +64,7 @@ pi -ne -e ./packages/pi-reader --tui-mode fullscreen
 - **Indicator**: `?` in READING shows the English help overlay (`Esc` to close) — a centered bordered box (`╭─╮`) with aligned key/description columns
 - **Count**: digits `1-9` accumulate (`0` only after existing buffer), cleared after `800ms` or after jump/scroll; `[`/`]` (`500ms`) is leader sequence; `/` search runs fully inside the extension (no TUI overlay) so `Enter`/`n`/`N` never fight the input focus
 - **Restore**: clears the `gg`/count/bracket buffers on exit, restores input and tool collapse state (tool expand/collapse is async and does not block the first frame)
+- **Position anchoring**: captures an anchor (nearest prompt ordinal + in-segment offset) synchronously before any height change, then restores via the unified clamp model once layout settles (exact restore → in-segment truncation → pin to last page when content below is shorter than a viewport, anchored line still on screen); the restore monitor calls `requestRender` every tick (pi-tui renders on demand — zero frames while idle, so the stability criterion would never fire otherwise); toggling while following-end is left to native follow-end semantics
 
 ## Compatibility & Limitations
 

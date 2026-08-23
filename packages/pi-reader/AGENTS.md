@@ -7,6 +7,8 @@
 - 阅读模式：`alt+o`（`config.json: toggleKey` 可改）经 `TUI inputListener` 拦截进/出 `READING`，`Promise` 异步展开工具输出；`/reader`、`/scroll` 兜底
 - Vim 翻页：`ctrl+u/d` 半页、`ctrl+f/b` 整页、`j/k`/`ctrl+n/p` 行、`g g` 顶部（300ms，含同批 `gg`）、`G` 底部
 - 指示：`ReadonlyEditor` 左显 `◉ Reading` 覆盖原输入（无边框），原输入保留；`?` 弹窗英文帮助 `Esc` 关闭
+- 位置保位：进出阅读与手动展开/收拢时视口钉在原问答附近；锚点为 OSC133 prompt 序号坐标系 `{k,d,count}`，恢复用统一 clamp 模型（详见 plan.md §4–§6）
+- 配置：`autoExpandTools: false` 关闭自动展开/收拢（位置天然无损）；`app.tools.expand` 在 READING 态也可用（走同一锚点包装）
 
 ## 架构（改动前必读）
 
@@ -29,6 +31,10 @@
 
 - **不注册 `pi.registerShortcut`**：阅读切换走 `inputListener`/`onTerminalInput`，避免与 `app.tools.expand` 冲突报 warning
 - **切换键**：默认 `alt+o`，`config.json: {"toggleKey":"alt+o"}` 可改；仅生效配置的那个，`?` 弹窗显示生效键
+- **配置路径**：jiti 把扩展编译为 base64 data:URL，`import.meta.url` 无文件路径——`readConfigJson` 必须用 CJS 包装注入的 `__dirname` 定位包目录（本级+父级都探测），勿改回 `import.meta.url`
+- **滚动保位**：一切会调 `setToolsExpanded` 的动作必须走 `toggleToolsExpandedWithAnchor` 包装（捕获→变更→挂 `ScrollRestoreMonitor`）；监视器每 tick 必须 `requestRender`（pi-tui 按需渲染，空闲零帧，否则稳定性判据永不满足）；恢复必带 `disableFollow:true`
+- **工具展开镜像**：`toolsExpandedMirror` 由扩展发起的调用维护；编辑态核心路径切换会导致漂移（进入 READING 即重新对齐），无 getter 可读真实值
+- **expand 分支优先级**（双通道一致）：`SEARCH_INPUT 吞键 > toggle > exit > help > app.tools.expand > 语义导航 > 滚动 switch`；插入点在 `isDuplicateNav` 之后、`tryHandleReadingNav` 之前；terminal 通道的 kb 用 factory 内捕获的 `latestKb`
 - `parseReadingKey` 兼容传统控制符与 Kitty 协议
 - `gg` 用 `GgSequence(300)`（含 `gg` 同批 `gg` 合并处理）
 - 阅读态吞掉可打印/单字节；退出键 `esc`/`i`/`ctrl+c`（`i` 仅退阅读，不落入输入），`?` 仅 READING 且 `Esc` 关闭

@@ -95,11 +95,11 @@ Merged by layer (array fields are **union**-deduplicated across layers, non-arra
 | -- | --- | --- |
 | `sensitivePatterns` | Sensitive file glob list | `*.env` `*.env.*` `~/.ssh/*` `*.pem` `*.key` `id_rsa*` `credentials.json` `secrets*.yaml` `~/.aws/*` `.npmrc` `~/.config/gh/hosts.yml` |
 | `envExampleReadAllowed` | Allow reading `.env.example` without prompt | `true` |
-| `readonlyBashCommands` | Bash read allowlist | High-frequency read-only commands (cat/grep/ls/..., ~70 entries) |
+| `readonlyBashCommands` | Bash read allowlist | High-frequency read-only commands (cat/grep/ls/..., 72 entries) |
 | `dangerousBashCommands` | Unified dangerous operation list (`sudo` or `git commit`) | Git write subcommands + dangerous shell |
 | `trustedExternalPaths` | Trusted external path prefixes — reads/writes under these prefixes are auto-allowed (e.g. `/tmp` for temp files; `os.tmpdir()` is merged at runtime) | `["/tmp"]` |
 | `readonlyTools` | Tool read allowlist (union across layers) | `read grep find ls` |
-| `strictPlanMode` | In plan mode, turn non-allowlist ask into deny | `false` |
+| `strictPlanMode` | Plan mode: unverifiable execution (X segments) tightened from ask to silent deny | `false` |
 | `toggleModeShortcut` | Plan/build toggle shortcut (empty string to disable) | `alt+p` |
 | `reviewLog` | Review log toggle (FR-6) | `true` |
 | `debugLog` | Debug log toggle (separate from review log, verbose events) | `false` |

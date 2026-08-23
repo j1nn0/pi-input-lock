@@ -93,11 +93,11 @@ pi install npm:@inobit/pi-permission
 | -- | ---- | ---- |
 | `sensitivePatterns` | 敏感文件 glob 清单 | `*.env` `*.env.*` `~/.ssh/*` `*.pem` `*.key` `id_rsa*` `credentials.json` `secrets*.yaml` `~/.aws/*` `.npmrc` `~/.config/gh/hosts.yml` |
 | `envExampleReadAllowed` | `.env.example` 读取免弹窗 | `true` |
-| `readonlyBashCommands` | bash read 白名单 | 高频只读命令（cat/grep/ls/...，约 70 项） |
+| `readonlyBashCommands` | bash read 白名单 | 高频只读命令（cat/grep/ls/...，72 项） |
 | `dangerousBashCommands` | 敏感操作统一清单（`sudo` 或 `git commit`） | git 写子命令 + 危险 shell |
 | `trustedExternalPaths` | trusted 外部路径前缀：前缀下读写直接放行（如 `/tmp` 临时文件；运行时并入系统临时目录 `os.tmpdir()`） | `["/tmp"]` |
 | `readonlyTools` | 工具 read 白名单（各层并集） | `read grep find ls` |
-| `strictPlanMode` | plan 下非白名单由 ask 收紧为 deny | `false` |
+| `strictPlanMode` | plan 下不可证执行（X 段兜底）由 ask 收紧为静默 deny | `false` |
 | `toggleModeShortcut` | plan/build 切换快捷键（空字符串禁用） | `alt+p` |
 | `reviewLog` | 审查日志开关（FR-6） | `true` |
 | `debugLog` | 调试日志开关（与审查日志分离，详细事件） | `false` |

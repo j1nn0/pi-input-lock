@@ -1,74 +1,67 @@
 # @inobit/pi-permission
 
-轻量权限控制扩展：按「效果可证明性 × 信任域」决策（R 纯读者 / W 有界写者 / X 不透明 + 危险叠加）。敏感文件保护 / 信任域边界 / 危险操作确认 / plan-build 只读模式。零第三方依赖，决策纯本地、确定性，fail-closed。
+Pi coding agent 的权限控制扩展：按「效果可证明性 × 信任域」对 bash 命令与工具调用做确定性决策——敏感文件保护、信任域边界、危险操作确认、plan-build 只读模式。
 
-## 判定优先级（改 decision.ts 前必读）
+> 环境要求、catalog、常用命令、版本与发布（含 tag 规范）、文档分工等公共约定见仓库根目录 `AGENTS.md`，本文件只写本包的目标、架构、结构与包特有约束。
 
-命令先经 bash.ts 分类器：前缀剥离（env/nice/timeout/nohup/setsid/stdbuf/command/VAR=x；sudo 不剥离直接叠加）→ R/W/X 三档 + 危险叠加 → approvalId（program 或 git:<sub>）。
+## 目标
+
+- **只拦该拦的**：敏感文件读写、信任域外的写入与不可证执行、危险叠加命令；其余一概不打扰
+- **fail-closed**：解析失败/看不懂的命令一律保守处理（ask 或静默 deny），绝不静默放行，也绝不因解析失败而崩溃拦截（插件自身异常降级为放行）
+- **拒绝可行动**：每条 deny 反馈自包含「类别 + 原因 + 改道路径」，`terminate:false` 让模型自行调整而非卡死任务
+- **降噪音**：会话批准记忆细粒度化（program/path/父目录）、hint 每 rule 会话一次、长命令中段省略展示
+
+## 架构（决策模型）
+
+命令按「副作用能否从参数完整推导」分三档，另加一层危险叠加：
+
+| 档 | 判定 | 例子 |
+| -- | ---- | ---- |
+| **R 纯读者** | 无文件副作用 | cat/grep/jq/git status |
+| **W 有界写者** | 写目标可从参数穷举 | touch/cp/mv/sed -i/重定向/find -delete |
+| **X 不透明** | 效果不可推导：解释器、构建工具、未识别程序、解析失败降级 | python3/npm/make/bash -c/tar 解压 |
+
+危险叠加（rm -r/-f、chmod/chown/chgrp -R/--recursive、git 写子命令、curl\|sh、sudo、wrapper 家族）凌驾于档位之上。
+
+决策管线：
 
 ```
-yolo：敏感文件 deny（FR-1，terminate:false，引导 .example/占位符）→ 其余全部 allow（rule:"yolo"，含 fail-closed/curl|sh/危险操作均放行）
-plan（只读契约）：① 危险叠加静默 deny → ② 可枚举写目标 ∉ T_plan 静默 deny（含项目内文件；X 段普通参数只是引用不算）
-  → ③ 敏感文件 ask → ④ 全部段 R/W（可证安全）allow → ⑤ 含 X 段真兜底：strictPlanMode ? 静默 deny : ask（FR-10，按 program 记忆）
-build（信任域 = cwd ∪ trusted）：① 危险叠加 ask → ② 敏感文件 ask → ③ 引用与写目标全部在信任域内 allow（R/W/X 同权，FR-5）
-  → ④ 纯 R（引用任意位置）allow → ⑤ 兜底：W 跨域写 FR-3（按 target 父目录记忆）/ X 跨域引用 FR-10（按 program 记忆）ask
+前缀剥离（env/nice/timeout N/nohup/setsid/stdbuf/command/builtin/exec/time/VAR=x；
+         sudo 不剥离直接叠加）→ 注册表查档 → 写动作扫描（R 可升级 W）→ glob/解析失败降 X
+→ 信任域判定：T_plan = trustedExternalPaths（∪ os.tmpdir()）；T_build = cwd ∪ trusted
+→ 模式决策表（见下）
 ```
 
-- 三档判定轴是「副作用能否从参数完整推导」而非程序名认识与否；未识别程序、glob/解析失败一律降 X（fail-closed，绝不静默拒绝也绝不假定只读）；tar 解压归 X；sed 无 -i 为 R、-i 升 W；git 未识别子命令归 X（不假定为只读）
-- 敏感文件跨所有通道生效且优先于信任域（`/tmp/.env` 写仍弹窗），realpath 双形态匹配防 symlink 绕过，`.env.example` 读取豁免
-- 无路径信息的工具（如 MCP）视为 cwd 内
-- **cd 跟踪**：链式命令中 cd 后相对路径按新目录判定（防 `cd /outside && cmd` 绕过）；`cd -`/无法解析时相对路径保守按外部处理
-- fail-closed：解析失败 / `$(...)` / 子 shell → build=ask、plan=deny，绝不静默放行
-- 插件自身异常降级为不拦截（不拖垮 pi 启动）
-- **deny 反馈文案**：按 plan.md B+ 表逐类区分并直接透传 decision.reason（自包含类别+原因+改道）+ "Do not retry as-is."；FR-1 单独模板带路径；全部 terminate:false 仅 Esc 硬终止为 true；hint 每 rule 会话内只展示一次
+- **plan（只读契约）**：① 危险叠加静默 deny → ② 可枚举写目标 ∉ T_plan 静默 deny（含项目内文件）→ ③ 敏感文件 ask → ④ 全部段 R/W allow → ⑤ 含 X 段真兜底（strictPlanMode ? 静默 deny : ask，FR-10）
+- **build**：① 危险叠加 ask → ② 敏感文件 ask → ③ 引用与写目标全部 ∈ T_build → allow（R/W/X 同权）→ ④ 纯 R（任意位置）allow → ⑤ 存在跨域引用兜底 ask（W 按 target 父目录、X 按 program 记忆）
+- **yolo**：跳过全部判定直接放行，仅敏感文件仍 deny（FR-1）
+- **前置层**：语法解析失败 / `$()` / 子 shell / 进程替换 → fail-closed（build=ask、plan=deny），不进上述决策表
+- 完整文案表（deny 反馈逐场景区分 + 红线）见仓库历史 plan.md B+ 节的设计裁决，改文案必须同步该表语义
 
-## 配置（config.ts 定义默认清单；全局/项目 config.json 覆盖）
-
-字段：`sensitivePatterns`、`envExampleReadAllowed`、`readonlyBashCommands`、`dangerousBashCommands`（`git <子命令>` + 危险 shell）、`readonlyTools`、`strictPlanMode`（默认 false）、`reviewLog`/`debugLog`、`logDir`（默认 `logs/pi-permission`，相对 `~/.pi/agent`，支持绝对路径/`~/`，扩展目录仅放配置）。
-
-- **数组字段全部跨层并集**（`sensitivePatterns`/`readonlyBashCommands`/`dangerousBashCommands`/`readonlyTools`）：
-  default ∪ global ∪ project ∪ session，去重不覆盖（`ARRAY_FIELDS`）；非数组字段高层覆盖
-- **无写命令/写工具配置**：内置写工具 `write`/`edit` 固定（plan 下明确 deny，`BUILTIN_WRITE_TOOLS`）；
-  内置写命令识别（mv/cp/mkdir/touch 等位置参数为写目标，`WRITE_LAST_ARG`/`WRITE_ALL_ARGS` 硬编码）——
-  `mv a /outside/` 提示 "writing outside project" 而非 read 白名单语义；
-  read 白名单命令只有通过重定向 `>` 才可能写文件
-- 内置 `readonlyTools` 仅 `read`/`grep`/`find`/`ls`（pi 核心只读工具）；第三方扩展工具需用户自行追加（各层并集）
-- 固定规则不可配置：`rm -r/-f`、`chmod -R`、`chown -R`、wrapper 家族（bash -c/eval/sudo/xargs/find -exec）、find -delete/-fls/-fprint* 恒为危险或写动作；启动器家族（env/nice/timeout N/nohup/setsid/stdbuf/VAR=x）在分类器内剥离，sudo 例外直接拦截
-- `exec_command` 按 bash 规则判定
-
-## /readonly-tools 三级（每层只改自己，其他层锁定）
-
-- 目标层：session（内存）/ project（`.pi/extensions/pi-permission/config.json`，需项目被信任）/ global（`~/.pi/.../config.json`）
-- 锁定集：编辑 X 层时，locked = 内置(`UI_LOCKED`) ∪ 其他各层已有工具；保存该层增量 = selected - locked
-- session 层存于 `index.ts` 的 `sessionReadonlyTools` Map；生效 = 持久层(loadConfig) ∪ session 层
-- project 写入需 `isProjectTrusted()`；写文件后 `invalidateConfig` 清缓存
-
-## 模块（src/）
+## 源码结构（src/）
 
 | 文件 | 职责 |
 | -- | ---- |
-| `index.ts` | 工厂装配：订阅 tool_call/before_agent_start/session_start，注册 /plan /build，会话级批准 |
-| `config.ts` | 默认清单 + 配置加载合并 |
-| `decision.ts` | 判定引擎，reason 带 `[bash]`/`[tool:<name>]`/`[yolo]` 前缀；yolo 首检敏感 `FR-1 deny` 其余 `allow yolo`（跳过 fail-closed） |
-| `bash.ts` | 自研简化解析器：切分/token/重定向/git 子命令/wrapper/分类/写目标（仅重定向） |
-| `path.ts` | 归一化 + realpath 双形态 + 敏感匹配 + cwd 边界 |
-| `mode.ts` | plan/build/yolo 内存状态、命令（/yolo 需二次确认 `y: confirm yolo`）、状态栏（`Yolo` warning 橙）、系统提示注入（`YOLO_SWITCH_NOTICE` 仅切入首轮） |
-| `tools.ts` | `/readonly-tools`：空格多选 readonly tools，session（内置+全局锁定）/ global（仅内置锁定） |
-| `ui.ts` | y/s/n 选择弹窗、无 UI 降级拒绝 |
-| `audit.ts` | 双流 JSONL 日志（review 审查 / debug 调试，参考 pi 生态实践）：脱敏 + 字段宽度上限 + 按项目分目录 + 大小轮转；写入 `~/.pi/agent/logs/pi-permission/<project>/`（更规范，与 `pi-debug.log` 同级），扩展目录仅放配置 |
+| `index.ts` | 工厂装配：tool_call 拦截、approvalKey 细粒度记忆（FR-10 键按模式隔离）、CONFIG_HINTS（每 rule 会话一次）、denyFeedback（用户拒绝 vs 规则拒绝双后缀）、/readonly-tools 装配 |
+| `bash.ts` | 自研简化解析器：顶层切分/token 化/重定向抽取、启动器前缀剥离、R/W/X 分类器（+ approvalId）、写动作扫描（find flag/sed -i/sort -o 等）、git 子命令三向归类 |
+| `decision.ts` | 双模式决策引擎（§上表）、displayCommand 中段省略与分行展示、resolveSegmentCwds cd 跟踪、yolo 短路 |
+| `path.ts` | normalizePath / realpathDeep（最深存在祖先解析，防父目录软链逃逸）/ isSensitivePath 三形态匹配 / isTrustedPath / isWithinCwd |
+| `config.ts` | DEFAULT_CONFIG 三注册表（读者/W/危险）+ 分层合并（数组并集）+ getAgentDir |
+| `mode.ts` | plan/build/yolo 状态机、/plan /build /yolo 命令、Alt+P 快捷键、系统提示注入（plan 常驻、build/yolo 切入首轮一次性公告） |
+| `tools.ts` | `/readonly-tools` 三级管理（session/project/global，每层只改自己，其他层锁定） |
+| `ui.ts` | y/s/n/r 四选项确认弹窗（r 进 emacs 输入自定义理由），无 UI 环境降级为 deny |
+| `audit.ts` | review/debug 双流 JSONL 日志：脱敏、字段宽度上限、按项目分目录、0600、大小轮转 |
 
-## 集成
+依赖方向：`index → decision / config / mode / tools / ui / audit`；`decision → bash / path / config`。
 
-- 模式状态键 `pi-permission-mode`（值 `Plan`/`Build`/`Yolo`，主题色：Plan 绿、Build 红、Yolo 橙 `warning`；**不带 `[` 前缀**，
-  否则 powerline 会归为通知类显示在编辑器上方而非 footer）；无 powerline 时显示于内置 footer 扩展状态行；
-  需放主状态栏最左边时在 settings.json 配 `powerline.customItems`（position: left，见 README）
-- subagent 继承宿主模式（内存态，会话级，不持久化）
+## 设计约束（改动前必读）
 
-## 测试
-
-```bash
-pnpm --filter @inobit/pi-permission test    # vitest（决策/bash/path/config/audit/装配）
-pnpm --filter @inobit/pi-permission check   # tsc --noEmit
-```
-
-覆盖验收要点：`.env` 弹窗/豁免、软链绕过、外部读写区分、git 只读/写子命令、plan/yolo 全量行为、未知 ask/strict deny、fail-closed 拆解引导、日志脱敏。
+- **三档完备是安全基石**：每个段必属 R/W/X 之一；未识别程序、glob/冷门语法解析失败一律降 X——禁止新增「看起来无害就当 R」的规则；禁止恢复「不在清单的 git 子命令视为只读」（假只读漏洞）
+- **危险叠加与档位无关**：改写重试（如把 `python3 x.py` 拆成 mv/cp）永远逃不出叠加与敏感检查——这是「邀请改写」类文案的安全前提，动分类器时不得破坏
+- **敏感判定永远优先于信任域**：trusted 目录内的敏感文件写仍弹窗（如 `/tmp/.env`）；危险叠加最先拦截
+- **FR-10 批准键按模式隔离**（`unverified:<mode>:<program>`）：build 的执行器批准不得泄漏到 plan 只读契约；plan 无任何执行器豁免配置（设计裁决，勿重新引入）
+- **realpathDeep 是写边界保证**：不存在目标的父目录软链必须深解析；新增路径判定入口时必须用 deep 形态而非 `realpathOf ?? abs`
+- **find 起始路径识别**依赖带值选项表（FIND_OPTION_WITH_VALUE），扩充 find 相关处理时同步维护；省略起始路径默认 `.`
+- **启动器剥离清单扩充必须配边界测试**：嵌套组合（sudo env nice timeout）、各家 flag（env -i/-u、timeout 30s、nice -n 5、time -p）、裸启动器回退；sudo/su 永不剥离
+- **deny 文案三层纪律**：指令式而非解释式；用户拒绝（n 键）后缀 `User declined; do not retry this operation or variants.` 强停含变体；禁 bypass/work around 类措辞、禁教模型自行切模式；改文案同步回归断言
+- **测试非交互运行**：`CI=true pnpm --filter @inobit/pi-permission test`（vitest 检测到 TTY 会进 watch 模式挂死）；软链/边界类 fixture 放 homedir 下，勿放 `/tmp`（trusted 前缀会掩盖越界）

@@ -28,6 +28,14 @@
 
 - git 未识别子命令不再假定只读（原「不在清单视为只读」属假只读漏洞）
 - sed 从「全参数视为写目标」修正为仅 `-i` 时写入
+- find 写 flag 省略起始路径时默认按 `.` 处理（GNU find 语义，`find -name "*.tmp" -delete` 不再漏判）；起始路径识别跳过带值选项的值（-name/-path/-newer 等）
+- `chmod/chown/chgrp --recursive` 长格式命中危险叠加（原先仅匹配含 `R` 的短选项）
+- `sort --output=` / `--output FILE` 长格式产生写目标（与 `-o` 同权）
+
+### Hardened（issue #1 复审加固）
+
+- 启动器剥离清单扩充：新增 `exec`/`time`/`builtin`——`exec bash -c 'x'` 命中危险叠加、`time -p ls` 正确还原为 ls、`builtin eval ls` 不再借只读外壳
+- `command`/`builtin` 的自身选项（如 `command -v`）消费后不影响真实程序识别
 
 ## [0.4.1] - 2026-08-21
 

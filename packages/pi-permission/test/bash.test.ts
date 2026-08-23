@@ -314,3 +314,28 @@ describe("classifySegment 补充（issue #1 回归）", () => {
     expect(w2).toContain("/outside/x");
   });
 });
+
+describe("分类器加固（issue #1 复审回归）", () => {
+  const cls = (cmd: string) => classifySegment(parseBashCommand(cmd).segments[0]!, cfg);
+
+  it("exec/time 纳入剥离：exec bash -c 命中危险叠加，time ls 为 R", () => {
+    expect(cls("exec bash -c 'x'")).toMatchObject({ tier: "X", danger: true });
+    expect(cls("exec ls")).toMatchObject({ tier: "R", danger: false });
+    expect(cls("time ls")).toMatchObject({ tier: "R", danger: false });
+    expect(cls("time -p grep x f")).toMatchObject({ tier: "R", danger: false });
+  });
+
+  it("command/builtin 的选项不再污染程序名（command -v git 回归）", () => {
+    // 剥离后等价于裸 git：按既有设计归 X（交互式保守），build 域内仍放行
+    expect(cls("command -v git")).toMatchObject({ tier: "X", danger: false });
+    expect(cls("builtin --version")).toMatchObject({ tier: "R", danger: false }); // 裸 builtin 回退自身，无副作用
+  });
+
+  it("find 写 flag 省略起始路径时默认 .（GNU find 语义）", () => {
+    const targets = collectWriteTargets(parseBashCommand("find -name '*.tmp' -delete").segments[0]!);
+    expect(targets).toEqual(["."]);
+    expect(cls("find -name '*.tmp' -delete")).toMatchObject({ tier: "W" });
+    const plan = decidePlanFallback();
+    function decidePlanFallback() { return "see decision.test"; }
+  });
+});

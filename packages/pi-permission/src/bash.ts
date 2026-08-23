@@ -68,7 +68,7 @@ const GIT_OPTION_WITH_VALUE = new Set([
 const WRAPPER_SHELLS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
 
 /** 可剥离的启动器前缀：效果修饰程序，不改变真实程序身份；sudo/su 不剥离（提权本身即危险，走叠加）。 */
-const STRIPPABLE_LAUNCHERS = new Set(["env", "nohup", "setsid", "stdbuf", "command", "builtin"]);
+const STRIPPABLE_LAUNCHERS = new Set(["env", "nohup", "setsid", "stdbuf", "command", "builtin", "exec"]);
 /** 变量赋值前缀（`FOO=bar`）：启动段环境设置，剥离后取真实程序。 */
 const VAR_ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*=/;
 /** 已知只读 git 子命令：不在其中的子命令视为未识别（X），不再假定为只读。 */
@@ -381,8 +381,13 @@ function stripLauncherPrefix(tokens: string[]): { program: string; args: string[
     }
     if (STRIPPABLE_LAUNCHERS.has(head)) {
       t.shift();
-      // 消费启动器自身的选项：env/stdbuf 的 - 开头 token（如 -i/-X SIZE）；其余启动器无值选项已含于 token
-      while (t.length > 0 && (t[0] === "-i" || t[0]!.startsWith("--") || (head === "stdbuf" && /^-[io]/.test(t[0]!)))) {
+      // 消费启动器自身的选项：command/builtin 的任意 -flag（如 -v）、env/stdbuf 的 -i/--x；其余启动器无值选项已含于 token
+      while (
+        t.length > 0 &&
+        (t[0] === "-i" ||
+          ((head === "command" || head === "builtin") && t[0]!.startsWith("-")) ||
+          (head === "stdbuf" && /^-[io]/.test(t[0]!)))
+      ) {
         // stdbuf 的 -o/-i 可能带值（-o 256K 与 -oL 两种形态），带空格分立时多消费一个
         if ((head === "stdbuf" && /^-[io]$/.test(t[0]!)) || (t[0] === "--suffix")) t.splice(0, 2);
         else t.splice(0, 1);
@@ -392,6 +397,11 @@ function stripLauncherPrefix(tokens: string[]): { program: string; args: string[
     if (head === "nice") {
       t.shift();
       if (t[0] === "-n" && t.length > 1) t.splice(0, 2);
+      continue;
+    }
+    if (head === "time") {
+      t.shift();
+      if (t[0] === "-p") t.shift();
       continue;
     }
     if (head === "timeout") {
@@ -629,10 +639,27 @@ export function collectWriteTargets(segment: BashSegment): string[] {
     // `2>/dev/null` 等 fd 重定向到空设备/&N 不产生文件副作用，豁免
     if (r.op !== "<" && !isHarmlessRedirectTarget(r.target)) targets.push(r.target);
   }
-  // find 写动作（-delete/-fls/-fprint*）：目标 = 起始路径（首个位置参数）
+  // find 写动作（-delete/-fls/-fprint*）：目标 = 起始路径；省略时 GNU find 默认从 . 递归删除。
+  // 起始路径识别需跳过带值选项的值（如 -name '*.tmp' 的模式不是起始路径）
   if (segment.program === "find" && segment.args.some((a) => FIND_WRITE_FLAGS.has(a))) {
-    const start = segment.args.find((a) => !a.startsWith("-"));
-    if (start !== undefined) targets.push(start);
+    const FIND_OPTION_WITH_VALUE = new Set([
+      "-name", "-iname", "-lname", "-ilname", "-path", "-wholename", "-regex", "-iregex",
+      "-newer", "-anewer", "-cnewer", "-size", "-user", "-group", "-uid", "-gid",
+      "-mtime", "-atime", "-ctime", "-mmin", "-amin", "-cmin", "-maxdepth", "-mindepth",
+      "-type", "-perm", "-context", "-fstype", "-used", "-samefile", "-inum", "-links",
+    ]);
+    let start: string | undefined;
+    for (let i = 0; i < segment.args.length; i++) {
+      const a = segment.args[i]!;
+      if (FIND_WRITE_FLAGS.has(a)) break; // 起始路径只会出现在写 flag 之前
+      if (a.startsWith("-")) {
+        if (FIND_OPTION_WITH_VALUE.has(a) && i + 1 < segment.args.length) i++;
+        continue;
+      }
+      start = a;
+      break;
+    }
+    targets.push(start ?? ".");
     return targets;
   }
   // sort -o <file>：输出目标可枚举（短选项分立/连写、长选项 =赋值与分立两种形态）

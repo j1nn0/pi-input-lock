@@ -2,19 +2,31 @@
 
 **English** | [中文](./README.zh-CN.md)
 
-Lightweight permission control for [Pi coding agent](https://pi.dev). Does only four things, everything else stays out of your way:
+Lightweight permission control for [Pi coding agent](https://pi.dev). Decisions are tiered by "effect provability" — only block what needs blocking:
 
-1. **Sensitive file protection**: `.env`, `.ssh/*`, `*.pem` etc. — any read or write (tool or bash) triggers a confirmation prompt.
-2. **Project boundary**: reads outside the project (outside cwd) go through a read allowlist (allow if matched, otherwise ask); writes require confirmation.
-3. **Dangerous operation confirmation**: `git push` / `git reset --hard`, `rm -rf`, `sudo`, `curl | sh` and similar always require confirmation.
-4. **Plan / Build modes**: `/plan` is read-only (writes denied), `/build` returns to normal.
+1. **Sensitive file protection**: `.env`, `~/.ssh/*`, `*.pem`, `.npmrc`, `~/.config/gh/hosts.yml` etc. — any read or write (tool or bash) triggers a confirmation prompt.
+2. **Trust domain boundary**: plan is read-only (out-of-domain writes silently denied); build trust domain = project dir ∪ trusted paths — everything inside is allowed, crossings are gated.
+3. **Dangerous operation confirmation**: `git push` / `rm -rf`, `sudo`, `curl | sh` and the danger overlay always require confirmation; unverifiable execution (interpreters/unknown programs) asks in plan and is allowed inside the build domain.
+4. **Plan / Build modes**: `/plan` is read-only (out-of-domain writes silently denied), `/build` returns to normal.
+
+## Effect Classification Model (R/W/X)
+
+Commands are classified by "can side effects be fully derived from the arguments" into three tiers, plus a danger overlay:
+
+| Tier | Criterion | Examples |
+| ---- | --------- | -------- |
+| **R pure reader** | No file side effects | cat/grep/jq/git status/sort (no -o) |
+| **W bounded writer** | Write targets fully enumerable from arguments | touch/mkdir/cp/mv/sed -i/redirects/find -delete |
+| **X opaque** | Effects not derivable — interpreters, build tools, every unrecognized program, parse-failure downgrades | python3/npm/make/bash -c/tar extraction/patch |
+
+The danger overlay (rm -r/-f, chmod/chown -R, git write subcommands, curl\|sh, sudo, bash -c, xargs, find -exec) sits above the tiers and keeps the existing product contract.
 
 ## Features
 
 - Zero third-party dependencies (besides Pi core packages), purely local deterministic decisions, fail-closed — never silently allows
 - Precise read/write distinction down to path granularity; symlinks and relative paths cannot bypass, relative paths after `cd` are resolved correctly
 - Sensitive file rules apply uniformly across all tools + bash
-- Trusted temp directory (`/tmp`) exemption: reads/writes under `/tmp` are auto-allowed in plan/build (friendly for validating computations with temp files during planning), dangerous/sensitive checks still take precedence
+- Trust domain model: plan domain = trusted paths (e.g. `/tmp`, free scratch reads/writes); build domain = project ∪ trusted — everything inside is allowed including executors; dangerous/sensitive checks always take precedence
 - Zero friction for high-frequency essentials (`cat` / `grep` / `ls` / `git status` / `sleep` etc.)
 
 ## Installation
@@ -36,13 +48,38 @@ pi install npm:@inobit/pi-permission
 - **Toggle shortcut**: `Alt+P` cycles between plan/build (remappable via `toggleModeShortcut`, empty string to disable; key format follows Pi [keybindings](https://pi.dev/docs/keybindings))
 - Status bar: `Plan` green / `Build` red (theme-aware), status key `pi-permission-mode`
 
-## Decision Priority (highest to lowest)
+## Core Decision Paths
 
-**Yolo mode**: sensitive file → deny (`terminate:false`, `Sensitive file blocked` — suggests using `.example`/placeholders); everything else → allow (`rule:"yolo"`, including `fail-closed` / `curl|sh` / dangerous operations)
+### Plan mode (read-only contract)
 
-**Plan mode** (regardless of cwd): dangerous operation → deny; non-exempt writes (target not under trusted, including sensitive file writes) → deny; sensitive file → ask; trusted paths (e.g. `/tmp`) read/write → allow; read allowlist → allow; everything else → ask (deny when `strictPlanMode` is on)
+```
+danger overlay hit (rm -rf / git push / sudo / curl|sh ...)   -> silent deny
+enumerable write target outside trust domain T_plan           -> silent deny
+(includes project files; plain args of X segments are refs only)
+sensitive file involved (read or write)                        -> ask
+all segments are R or W (W targets proven inside T_plan)       -> allow
+fallback: any X segment (unverifiable effects)                 -> strict ? silent deny : ask
+```
 
-**Build mode**: dangerous operation ask → sensitive file ask → (inside cwd or all external refs under trusted → allow; outside-cwd read allowlist allow → otherwise ask)
+### Build mode
+
+```
+danger overlay hit                                             -> ask
+sensitive file involved (read or write)                        -> ask
+all refs & write targets of every segment inside T_build       -> allow (R/W/X alike)
+   (T_build = cwd + trusted paths; python3 /tmp/x.py and npm test both allowed)
+pure R (refs anywhere)                                         -> allow
+otherwise (W/X with cross-domain refs)                         -> ask
+```
+
+Pre-layer: unparseable syntax / `$()` / subshell / process substitution -> fail-closed before the tables (build=ask, plan=deny). Yolo mode skips all checks except sensitive files (still denied). Ask dialogs pick `s` to approve per program/path/parent-dir for the session; hints show once per rule per session.
+
+## Threat Model & Residual Risks (must read)
+
+- Allowing executors inside the build trust domain = accepting the full capability of arbitrary code execution there. Script content can silently cross trust domains (write `~/.ssh`, network) — the permission system sees the command surface, not code behavior. **This extension is an in-process rule layer, not a sandbox**; use containers/disposable environments for real isolation
+- W-tier safety equals target-enumeration correctness; unparseable syntax conservatively downgrades to X, but enumeration bugs themselves become mis-allows
+- TOCTOU/symlink races are mitigated, not eliminated; `/tmp` is world-writable on multi-user machines
+- Plan mode has no executor exemption mechanism: X segments always ask (silent deny under strict), keeping the read-only contract intact
 
 ## Configuration
 
@@ -56,7 +93,7 @@ Merged by layer (array fields are **union**-deduplicated across layers, non-arra
 
 | Field | Description | Default |
 | -- | --- | --- |
-| `sensitivePatterns` | Sensitive file glob list | `*.env` `*.env.*` `~/.ssh/*` `*.pem` `*.key` `id_rsa*` `credentials.json` `secrets*.yaml` `~/.aws/*` `.npmrc` |
+| `sensitivePatterns` | Sensitive file glob list | `*.env` `*.env.*` `~/.ssh/*` `*.pem` `*.key` `id_rsa*` `credentials.json` `secrets*.yaml` `~/.aws/*` `.npmrc` `~/.config/gh/hosts.yml` |
 | `envExampleReadAllowed` | Allow reading `.env.example` without prompt | `true` |
 | `readonlyBashCommands` | Bash read allowlist | High-frequency read-only commands (cat/grep/ls/..., ~70 entries) |
 | `dangerousBashCommands` | Unified dangerous operation list (`sudo` or `git commit`) | Git write subcommands + dangerous shell |

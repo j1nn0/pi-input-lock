@@ -42,12 +42,41 @@ export interface ParsedCommand {
   parseError: boolean;
 }
 
+/**
+ * 效果三档（效果可证明性分类）：
+ * - R 纯读者：无文件副作用
+ * - W 有界写者：写目标可从参数穷举
+ * - X 不透明：效果不可从参数推导（解释器、构建工具、未识别程序、解析失败降级）
+ */
+export type EffectTier = "R" | "W" | "X";
+
+/** 单段分类结果：效果档位 + 危险叠加标记 + 批准记忆标识。 */
+export interface SegmentClass {
+  /** 效果档位。 */
+  tier: EffectTier;
+  /** 危险叠加命中（凌驾档位之上的产品契约层，如 rm -rf / sudo / git push / wrapper）。 */
+  danger: boolean;
+  /** 会话批准记忆标识：程序名或 `git:<子命令>`。 */
+  approvalId: string;
+}
+
 const GIT_OPTION_WITH_VALUE = new Set([
   "-C", "-c", "--git-dir", "--work-tree", "--exec-path",
   "--namespace", "--super-prefix", "--object-format", "--no-optional-locks",
 ]);
 
 const WRAPPER_SHELLS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
+
+/** 可剥离的启动器前缀：效果修饰程序，不改变真实程序身份；sudo/su 不剥离（提权本身即危险，走叠加）。 */
+const STRIPPABLE_LAUNCHERS = new Set(["env", "nohup", "setsid", "stdbuf", "command"]);
+/** 变量赋值前缀（`FOO=bar`）：启动段环境设置，剥离后取真实程序。 */
+const VAR_ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*=/;
+/** 已知只读 git 子命令：不在其中的子命令视为未识别（X），不再假定为只读。 */
+export const GIT_READONLY_SUBS = new Set([
+  "status", "log", "diff", "show", "fetch", "remote", "branch", "tag", "stash", "config",
+  "ls-files", "rev-parse", "describe", "shortlog", "reflog", "grep", "cat-file",
+  "blame", "whatchanged", "ls-remote", "symbolic-ref", "var", "version", "help",
+]);
 
 /** 顶层连接操作符（引号外、括号外才生效）。 */
 const TOP_LEVEL_OPS = ["||", ";;", "|&", "|", ";", "\n"];
@@ -325,7 +354,7 @@ function extractGit(args: string[]): { subcommand?: string; gitArgs: string[] } 
   return { subcommand: undefined, gitArgs: [] };
 }
 
-/** 检测包装命令：bash -c / eval / sudo / xargs / find -exec 等（FR-4 fail-closed）。 */
+/** 检测包装命令：bash -c / eval / sudo / xargs / find -exec 等（危险叠加）。 */
 function detectWrapper(program: string, args: string[]): boolean {
   if (program === "eval" || program === "sudo" || program === "su" || program === "xargs") {
     return true;
@@ -339,6 +368,48 @@ function detectWrapper(program: string, args: string[]): boolean {
   return false;
 }
 
+/** 剥离启动器前缀（env/nice/timeout/nohup/setsid/stdbuf/command/VAR=x），返回真实程序与参数。
+ * sudo 不剥离：提权本身即危险叠加。剥离后 tokens 为空（裸 `env`）时保留原程序名（仅打印环境变量，读者）。 */
+function stripLauncherPrefix(tokens: string[]): { program: string; args: string[] } {
+  const t = [...tokens];
+  while (t.length > 0) {
+    const head = t[0]!;
+    if (head === "sudo" || head === "su") break;
+    if (VAR_ASSIGN.test(head) && head.includes("=")) {
+      t.shift();
+      continue;
+    }
+    if (STRIPPABLE_LAUNCHERS.has(head)) {
+      t.shift();
+      // 消费启动器自身的选项：env/stdbuf 的 - 开头 token（如 -i/-X SIZE）；其余启动器无值选项已含于 token
+      while (t.length > 0 && (t[0] === "-i" || t[0]!.startsWith("--") || (head === "stdbuf" && /^-[io]/.test(t[0]!)))) {
+        // stdbuf 的 -o/-i 可能带值（-o 256K 与 -oL 两种形态），带空格分立时多消费一个
+        if ((head === "stdbuf" && /^-[io]$/.test(t[0]!)) || (t[0] === "--suffix")) t.splice(0, 2);
+        else t.splice(0, 1);
+      }
+      continue;
+    }
+    if (head === "nice") {
+      t.shift();
+      if (t[0] === "-n" && t.length > 1) t.splice(0, 2);
+      continue;
+    }
+    if (head === "timeout") {
+      t.shift();
+      // 第一个位置参数是时长（如 30 / 30s / 2m）
+      if (t.length > 0 && /^\d/.test(t[0]!)) t.shift();
+      continue;
+    }
+    break;
+  }
+  if (t.length === 0) {
+    // 裸启动器（如 `env`）：还原为自身程序名
+    const orig = tokens[0] ?? "";
+    return { program: orig === "" ? "" : path.posix.basename(orig), args: [] };
+  }
+  return { program: path.posix.basename(t[0]!), args: t.slice(1) };
+}
+
 /** 解析 bash 命令为顶层命令段结构（自研简化解析器，D11）。 */
 export function parseBashCommand(command: string): ParsedCommand {
   const top = splitTopLevel(command);
@@ -349,9 +420,10 @@ export function parseBashCommand(command: string): ParsedCommand {
     if (trimmed === "") return;
     const { tokens, redirects, error } = tokenizeSegment(trimmed);
     if (error) top.parseError = true;
-    const program = tokens.length > 0 ? path.posix.basename(tokens[0]!) : "";
-    const args = tokens.slice(1);
-    const git = program === "git" ? extractGit(tokens) : undefined;
+    const stripped = stripLauncherPrefix(tokens);
+    const program = stripped.program;
+    const args = stripped.args;
+    const git = program === "git" ? extractGit([program, ...args]) : undefined;
     const segment: BashSegment = {
       raw: trimmed,
       prevOp: idx === 0 ? "" : (top.ops[idx - 1] ?? ""),
@@ -374,36 +446,80 @@ export function parseBashCommand(command: string): ParsedCommand {
   };
 }
 
-export type SegmentKind = "read" | "dangerous" | "unknown";
+export type SegmentTier = "R" | "W" | "X";
+
+export interface SegmentClassification {
+  /** 效果档位：R 纯读者 / W 有界写者 / X 不透明（效果不可从参数推导）。 */
+  tier: SegmentTier;
+  /** 危险叠加命中：wrapper、固定规则（rm -r/-f 等）、危险清单。凌驾于档位之上。 */
+  danger: boolean;
+  /** 会话批准记忆键用的程序标识（git 子命令为 `git:<sub>`）。 */
+  id: string;
+}
 
 const DANGEROUS_BRANCH_FLAGS = /^-[dDmMcC]$|^--(delete|move|copy|create-reflog)/;
 
-/** 命令段读写分类（build 模式：dangerous→ask；plan 模式：非 read→deny）。 */
-export function classifySegment(segment: BashSegment, config: PermissionConfig): SegmentKind {
-  if (segment.wrapper) return "dangerous";
+/** find 写动作 flag：目标 = 起始路径（可枚举），命中后段升级为 W。 */
+const FIND_WRITE_FLAGS = new Set(["-delete", "-fls", "-fprint", "-fprint0", "-fprintf"]);
 
-  if (segment.program === "git") {
+/** sed -i 变体（含 `-i.bak` 后缀形态）：原位写入，段升级为 W。 */
+const SED_IN_PLACE = /^-i(bak.*|\.[A-Za-z0-9_]+)?$/;
+
+/** 命令段效果分类：R/W/X 三档 + 危险叠加。
+ * 判定轴是「副作用能否从参数完整推导」而非程序名认识与否；未识别程序一律 X（fail-closed）。
+ * 前缀已在 parseBashCommand 中剥离，此处看到的是真实程序。 */
+export function classifySegment(segment: BashSegment, config: PermissionConfig): SegmentClassification {
+  const { program } = segment;
+  const id = program === "git" && segment.gitSubcommand ? `git:${segment.gitSubcommand}` : program;
+
+  // ---- 空段：纯重定向（如 `> foo`）效果为截断/创建且可枚举 → W；裸赋值无文件副作用 → R ----
+  if (program === "") {
+    const writes = collectWriteTargets(segment);
+    return { tier: writes.length > 0 ? "W" : "R", danger: false, id: "" };
+  }
+
+  // ---- 危险叠加 ----
+  let danger = false;
+  if (segment.wrapper) {
+    return { tier: "X", danger: true, id };
+  }
+  if (program === "git") {
     const sub = segment.gitSubcommand;
-    if (!sub) return "unknown";
-    // 统一危险清单：命中 `git <子命令>` 条目才危险；其余 git 子命令视为只读（status/diff/log 等）
+    // 裸 git：交互式，不可证 → X
+    if (!sub) return { tier: "X", danger: false, id };
+    // 危险清单命中的子命令：只读形态豁免叠加，否则叠加 + X
     if (config.dangerousBashCommands.includes(`git ${sub}`)) {
-      return isGitReadonlyForm(segment, sub) ? "read" : "dangerous";
+      const danger = !isGitReadonlyForm(segment, sub);
+      return { tier: danger ? "X" : "R", danger, id };
     }
-    return "read";
+    // 未识别子命令不再假定只读（X）；已知只读子命令 → R
+    if (!GIT_READONLY_SUBS.has(sub)) return { tier: "X", danger: false, id };
+    return { tier: "R", danger: false, id };
   }
+  if (program === "rm") {
+    if (segment.args.some((a) => a.startsWith("-") && /[rf]/.test(a))) return { tier: "X", danger: true, id };
+  } else if ((program === "chmod" || program === "chown") && segment.args.some((a) => a.startsWith("-") && a.includes("R"))) {
+    return { tier: "X", danger: true, id };
+  }
+  if (config.dangerousBashCommands.includes(program)) return { tier: "X", danger: true, id };
 
-  // 固定规则（不可配置）：rm -r/-f、chmod -R、chown -R
-  if (segment.program === "rm") {
-    // 仅带 -r/-f 的 rm 危险；单文件 rm 视为普通命令
-    return segment.args.some((a) => a.startsWith("-") && /[rf]/.test(a)) ? "dangerous" : "unknown";
+  // ---- 档位判定 ----
+  // 有界写者注册表（W 种子）：tar 移出（解压目标不可枚举）；sed 特殊（仅 -i 升 W）
+  const writeTargets = collectWriteTargets(segment);
+  let tier: SegmentTier;
+  if (WRITE_LAST_ARG.has(program) || (WRITE_ALL_ARGS.has(program) && program !== "tar")) {
+    tier = "W";
+  } else if (program === "sed" && segment.args.some((a) => SED_IN_PLACE.test(a))) {
+    tier = "W";
+  } else if (config.readonlyBashCommands.includes(program)) {
+    // 读种子 + 写动作扫描（重定向/sort -o/find 写 flag）→ 升级 W；否则保持 R
+    tier = writeTargets.length > 0 ? "W" : "R";
+  } else {
+    return { tier: "X", danger: false, id };
   }
-  if (segment.program === "chmod" || segment.program === "chown") {
-    return segment.args.some((a) => a.startsWith("-") && a.includes("R")) ? "dangerous" : "unknown";
-  }
-
-  if (config.dangerousBashCommands.includes(segment.program)) return "dangerous";
-  if (config.readonlyBashCommands.includes(segment.program)) return "read";
-  return "unknown";
+  // W 目标含 glob（* ?）→ 无法穷举 → 降级 X（保守：plan 落⑤ ask，build 域内仍③放行）
+  if (tier === "W" && writeTargets.some((t) => /[*?]/.test(t))) tier = "X";
+  return { tier, danger: false, id };
 }
 
 /** 命中危险清单的 git 子命令中，仅列表演示的形态仍视为只读（避免误伤 git branch/stash list/remote -v）。 */
@@ -488,12 +604,13 @@ function isHarmlessRedirectTarget(target: string): boolean {
   return target === "/dev/null" || target.startsWith("&");
 }
 
-/** 内置写命令（硬编码，不可配置）：位置参数视为写入目标，用于区分读写语义与外部写判定。 */
+/** 内置写命令（硬编码，不可配置）：位置参数视为写入目标，用于区分读写语义与外部写判定。
+ * tar 已移出（解压目标由包内容决定不可枚举，归 X）；sed 特殊处理（仅 -i 原位写入，含 -i.bak 后缀变体）。 */
 const WRITE_LAST_ARG = new Set(["cp", "mv", "ln", "install", "scp", "rsync"]);
 const WRITE_ALL_ARGS = new Set([
   "mkdir", "rmdir", "touch", "rm", "tee", "truncate", "unlink", "shred",
   "chmod", "chown", "chgrp", "chattr", "dd",
-  "gzip", "gunzip", "bzip2", "xz", "zstd", "zip", "unzip", "tar", "sed",
+  "gzip", "gunzip", "bzip2", "xz", "zstd", "zip", "unzip",
 ]);
 
 /**
@@ -509,15 +626,35 @@ export function collectWriteTargets(segment: BashSegment): string[] {
     // `2>/dev/null` 等 fd 重定向到空设备/&N 不产生文件副作用，豁免
     if (r.op !== "<" && !isHarmlessRedirectTarget(r.target)) targets.push(r.target);
   }
+  // find 写动作（-delete/-fls/-fprint*）：目标 = 起始路径（首个位置参数）
+  if (segment.program === "find" && segment.args.some((a) => FIND_WRITE_FLAGS.has(a))) {
+    const start = segment.args.find((a) => !a.startsWith("-"));
+    if (start !== undefined) targets.push(start);
+    return targets;
+  }
+  // sort -o <file>：输出目标可枚举
+  if (segment.program === "sort") {
+    for (let i = 0; i < segment.args.length; i++) {
+      const a = segment.args[i]!;
+      if (a === "-o" && i + 1 < segment.args.length) targets.push(segment.args[i + 1]!);
+      else if (a.startsWith("-o") && a.length > 2) targets.push(a.slice(2));
+    }
+  }
+  // sed 仅在 -i（含 -i.bak 变体）时原位写入；chmod/chown/chgrp 首位是 mode/owner
+  const sedInPlace = segment.program === "sed" && segment.args.some((a) => SED_IN_PLACE.test(a));
   if (WRITE_LAST_ARG.has(segment.program)) {
     const positionals = segment.args.filter((a) => !a.startsWith("-"));
     if (positionals.length > 0) targets.push(positionals[positionals.length - 1]!);
     return targets;
   }
+  if (sedInPlace) {
+    // sed 原位写：跳过脚本表达式（首个非 flag 位置参数），其余为被编辑文件
+    const files = segment.args.filter((a) => !a.startsWith("-")).slice(1);
+    targets.push(...files);
+    return targets;
+  }
   if (WRITE_ALL_ARGS.has(segment.program)) {
-    // sed 仅在 -i 时原位写入，且首个位置参数为表达式；chmod/chown 首位是 mode/owner
-    if (segment.program === "sed" && !segment.args.includes("-i")) return targets;
-    let skipFirst = segment.program === "sed" || segment.program === "chmod" || segment.program === "chown" || segment.program === "chgrp";
+    let skipFirst = segment.program === "chmod" || segment.program === "chown" || segment.program === "chgrp";
     for (const a of segment.args) {
       if (a.startsWith("-")) continue;
       if (skipFirst) {

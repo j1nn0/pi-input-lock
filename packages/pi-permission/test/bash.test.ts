@@ -106,76 +106,111 @@ describe("parseBashCommand 复杂语法 fail-closed 标记", () => {
   });
 });
 
-describe("classifySegment 命令分类", () => {
-  it("git 只读子命令为 read", () => {
-    expect(classifySegment(parseBashCommand("git status").segments[0]!, cfg)).toBe("read");
-    expect(classifySegment(parseBashCommand("git diff").segments[0]!, cfg)).toBe("read");
-    expect(classifySegment(parseBashCommand("git log").segments[0]!, cfg)).toBe("read");
-    expect(classifySegment(parseBashCommand("git remote -v").segments[0]!, cfg)).toBe("read");
+describe("classifySegment 命令分类（R/W/X 三档 + 危险叠加）", () => {
+  const cls = (cmd: string) => classifySegment(parseBashCommand(cmd).segments[0]!, cfg);
+
+  it("git 只读子命令为 R（已知子命令清单）", () => {
+    expect(cls("git status")).toMatchObject({ tier: "R", danger: false });
+    expect(cls("git diff")).toMatchObject({ tier: "R", danger: false });
+    expect(cls("git log")).toMatchObject({ tier: "R", danger: false });
+    expect(cls("git remote -v")).toMatchObject({ tier: "R", danger: false });
   });
 
-  it("git 写子命令为 dangerous（统一危险清单）", () => {
-    expect(classifySegment(parseBashCommand("git commit").segments[0]!, cfg)).toBe("dangerous");
-    expect(classifySegment(parseBashCommand("git push").segments[0]!, cfg)).toBe("dangerous");
-    expect(classifySegment(parseBashCommand("git reset --hard").segments[0]!, cfg)).toBe("dangerous");
-    expect(classifySegment(parseBashCommand("git checkout").segments[0]!, cfg)).toBe("dangerous");
-    expect(classifySegment(parseBashCommand("git remote add origin x").segments[0]!, cfg)).toBe("dangerous");
-    expect(classifySegment(parseBashCommand("git stash pop").segments[0]!, cfg)).toBe("dangerous");
+  it("git 写子命令为危险叠加 + X（统一危险清单）", () => {
+    expect(cls("git commit")).toMatchObject({ tier: "X", danger: true });
+    expect(cls("git push")).toMatchObject({ tier: "X", danger: true });
+    expect(cls("git reset --hard")).toMatchObject({ tier: "X", danger: true });
+    expect(cls("git checkout")).toMatchObject({ tier: "X", danger: true });
+    expect(cls("git remote add origin x")).toMatchObject({ tier: "X", danger: true });
+    expect(cls("git stash pop")).toMatchObject({ tier: "X", danger: true });
   });
 
-  it("git 只读子命令（不在危险清单）为 read", () => {
-    expect(classifySegment(parseBashCommand("git status").segments[0]!, cfg)).toBe("read");
-    expect(classifySegment(parseBashCommand("git fetch").segments[0]!, cfg)).toBe("read");
-    expect(classifySegment(parseBashCommand("git log").segments[0]!, cfg)).toBe("read");
-    expect(classifySegment(parseBashCommand("git remote -v").segments[0]!, cfg)).toBe("read");
+  it("git 未识别子命令不再假定只读（修正假只读漏洞）", () => {
+    expect(cls("git foobar")).toMatchObject({ tier: "X", danger: false });
   });
 
-  it("git branch 列表演示为 read，创建/删除为 dangerous", () => {
-    expect(classifySegment(parseBashCommand("git branch").segments[0]!, cfg)).toBe("read");
-    expect(classifySegment(parseBashCommand("git branch -a").segments[0]!, cfg)).toBe("read");
-    expect(classifySegment(parseBashCommand("git branch -D foo").segments[0]!, cfg)).toBe("dangerous");
+  it("git branch 列表演示为 R，创建/删除为危险叠加", () => {
+    expect(cls("git branch")).toMatchObject({ tier: "R", danger: false });
+    expect(cls("git branch -a")).toMatchObject({ tier: "R", danger: false });
+    expect(cls("git branch -D foo")).toMatchObject({ tier: "X", danger: true });
   });
 
-  it("git stash list 为 read，pop/drop 为 dangerous", () => {
-    expect(classifySegment(parseBashCommand("git stash list").segments[0]!, cfg)).toBe("read");
-    expect(classifySegment(parseBashCommand("git stash show").segments[0]!, cfg)).toBe("read");
-    expect(classifySegment(parseBashCommand("git stash pop").segments[0]!, cfg)).toBe("dangerous");
-    expect(classifySegment(parseBashCommand("git stash drop").segments[0]!, cfg)).toBe("dangerous");
+  it("git stash list 为 R，pop/drop 为危险叠加", () => {
+    expect(cls("git stash list")).toMatchObject({ tier: "R", danger: false });
+    expect(cls("git stash show")).toMatchObject({ tier: "R", danger: false });
+    expect(cls("git stash pop")).toMatchObject({ tier: "X", danger: true });
+    expect(cls("git stash drop")).toMatchObject({ tier: "X", danger: true });
   });
 
-  it("git config 只读形态为 read，写入为 dangerous", () => {
-    expect(classifySegment(parseBashCommand("git config --list").segments[0]!, cfg)).toBe("read");
-    expect(classifySegment(parseBashCommand("git config --get user.name").segments[0]!, cfg)).toBe("read");
-    expect(classifySegment(parseBashCommand("git config user.name foo").segments[0]!, cfg)).toBe("dangerous");
+  it("git config 只读形态为 R，写入为危险叠加", () => {
+    expect(cls("git config --list")).toMatchObject({ tier: "R", danger: false });
+    expect(cls("git config --get user.name")).toMatchObject({ tier: "R", danger: false });
+    expect(cls("git config user.name foo")).toMatchObject({ tier: "X", danger: true });
   });
 
-  it("高频只读命令为 read", () => {
-    expect(classifySegment(parseBashCommand("cat a.txt").segments[0]!, cfg)).toBe("read");
-    expect(classifySegment(parseBashCommand("grep foo").segments[0]!, cfg)).toBe("read");
-    expect(classifySegment(parseBashCommand("ls").segments[0]!, cfg)).toBe("read");
-    expect(classifySegment(parseBashCommand("sleep 1").segments[0]!, cfg)).toBe("read");
+  it("高频只读命令为 R", () => {
+    expect(cls("cat a.txt")).toMatchObject({ tier: "R" });
+    expect(cls("grep foo")).toMatchObject({ tier: "R" });
+    expect(cls("ls")).toMatchObject({ tier: "R" });
+    expect(cls("sleep 1")).toMatchObject({ tier: "R" });
+    expect(cls("jq . f.json")).toMatchObject({ tier: "R" });
   });
 
-  it("危险命令为 dangerous", () => {
-    expect(classifySegment(parseBashCommand("rm -rf /").segments[0]!, cfg)).toBe("dangerous");
-    expect(classifySegment(parseBashCommand("sudo cat /etc/shadow").segments[0]!, cfg)).toBe("dangerous");
-    expect(classifySegment(parseBashCommand("dd if=/dev/zero of=/dev/sda").segments[0]!, cfg)).toBe("dangerous");
-    expect(classifySegment(parseBashCommand("chmod -R 777 /").segments[0]!, cfg)).toBe("dangerous");
+  it("危险命令为 X + 危险叠加", () => {
+    expect(cls("rm -rf /")).toMatchObject({ tier: "X", danger: true });
+    expect(cls("sudo cat /etc/shadow")).toMatchObject({ tier: "X", danger: true });
+    expect(cls("dd if=/dev/zero of=/dev/sda")).toMatchObject({ tier: "X", danger: true });
+    expect(cls("chmod -R 777 /")).toMatchObject({ tier: "X", danger: true });
   });
 
-  it("普通 rm 单文件为 unknown", () => {
-    expect(classifySegment(parseBashCommand("rm a.txt").segments[0]!, cfg)).toBe("unknown");
+  it("普通 rm 单文件为 W（有界写者，无叠加）", () => {
+    expect(cls("rm a.txt")).toMatchObject({ tier: "W", danger: false });
   });
 
-  it("未知命令为 unknown", () => {
-    expect(classifySegment(parseBashCommand("python script.py").segments[0]!, cfg)).toBe("unknown");
+  it("未知/解释器命令为 X（效果不可推导）", () => {
+    expect(cls("python script.py")).toMatchObject({ tier: "X" });
+    expect(cls("tar xf archive.tar")).toMatchObject({ tier: "X" });
+    expect(cls("patch < fix.patch")).toMatchObject({ tier: "X" });
   });
 
-  it("wrapper 命令为 dangerous", () => {
-    expect(classifySegment(parseBashCommand("bash -c 'rm -rf /'").segments[0]!, cfg)).toBe("dangerous");
-    expect(classifySegment(parseBashCommand("eval ls").segments[0]!, cfg)).toBe("dangerous");
-    expect(classifySegment(parseBashCommand("xargs rm").segments[0]!, cfg)).toBe("dangerous");
-    expect(classifySegment(parseBashCommand("find . -exec rm {} ;").segments[0]!, cfg)).toBe("dangerous");
+  it("wrapper 命令为 X + 危险叠加", () => {
+    expect(cls("bash -c 'rm -rf /'")).toMatchObject({ tier: "X", danger: true });
+    expect(cls("eval ls")).toMatchObject({ tier: "X", danger: true });
+    expect(cls("xargs rm")).toMatchObject({ tier: "X", danger: true });
+    expect(cls("find . -exec rm {} ;")).toMatchObject({ tier: "X", danger: true });
+  });
+
+  it("启动器前缀剥离：效果修饰不改变真实程序身份（根治 env 绕过）", () => {
+    expect(cls("env FOO=x ls")).toMatchObject({ tier: "R", danger: false });
+    expect(cls("nohup grep foo f")).toMatchObject({ tier: "R", danger: false });
+    expect(cls("timeout 30 make")).toMatchObject({ tier: "X" }); // make 未注册 → X
+    expect(cls("nice -n 5 cat a")).toMatchObject({ tier: "R", danger: false });
+    // sudo 不剥离：提权本身即危险叠加
+    expect(cls("sudo env rm -rf x")).toMatchObject({ tier: "X", danger: true });
+    // 剥离后命中真实程序的危险形态
+    expect(cls("env rm -rf x")).toMatchObject({ tier: "X", danger: true });
+  });
+
+  it("空段纯重定向归 W；裸赋值归 R", () => {
+    const redir = parseBashCommand("> foo").segments[0]!;
+    expect(classifySegment(redir, cfg)).toMatchObject({ tier: "W" });
+  });
+
+  it("sed 无 -i 为 R、-i（含后缀变体）升级 W", () => {
+    expect(cls("sed s/a/b/ f.txt")).toMatchObject({ tier: "R" });
+    expect(cls("sed -i s/a/b/ f.txt")).toMatchObject({ tier: "W" });
+    expect(cls("sed -i.bak s/a/b/ f.txt")).toMatchObject({ tier: "W" });
+  });
+
+  it("find 读种子 + 写 flag 升级 W", () => {
+    expect(cls("find . -name x")).toMatchObject({ tier: "R" });
+    expect(cls("find . -name x -delete")).toMatchObject({ tier: "W" });
+    expect(cls("find . -fls out.log")).toMatchObject({ tier: "W" });
+  });
+
+  it("sort -o 升级 W；jq 保持 R", () => {
+    expect(cls("sort data")).toMatchObject({ tier: "R" });
+    expect(cls("sort data -o out")).toMatchObject({ tier: "W" });
   });
 });
 

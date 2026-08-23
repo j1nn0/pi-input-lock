@@ -52,6 +52,7 @@ export const DEFAULT_CONFIG: PermissionConfig = {
     "secrets*.yaml",
     "~/.aws/*",
     ".npmrc",
+    "~/.config/gh/hosts.yml",
   ],
   envExampleReadAllowed: true,
   readonlyBashCommands: [
@@ -63,7 +64,7 @@ export const DEFAULT_CONFIG: PermissionConfig = {
     // 搜索类
     "grep", "rg", "ag", "ack", "fzf",
     // 文本比较/处理（只读形态）
-    "diff", "comm", "cmp", "sort", "uniq", "cut", "paste", "join", "tr",
+    "diff", "comm", "cmp", "sort", "uniq", "cut", "paste", "join", "tr", "sed", "jq",
     // 进程/系统信息类
     "ps", "top", "htop", "uptime", "date", "who", "whoami", "id", "uname", "hostname",
     "free", "vmstat", "iostat", "netstat", "ss", "lsof",

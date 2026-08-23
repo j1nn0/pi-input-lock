@@ -8,7 +8,6 @@ import {
   hasPipeToShell,
   parseBashCommand,
   type BashSegment,
-  type SegmentKind,
 } from "./bash.ts";
 import { expandHome, isSensitivePath, isSensitiveReadException, isTrustedPath, isWithinCwd, realpathOf } from "./path.ts";
 
@@ -16,11 +15,13 @@ export type DecisionAction = "allow" | "ask" | "deny";
 
 export interface Decision {
   action: DecisionAction;
-  /** 命中规则标识：FR-1 / FR-2 / FR-3 / FR-4 / FR-5 / FR-7 / FR-8 / FR-9 / default。 */
+  /** 命中规则标识。 */
   rule: string;
   /** 面向用户的说明（含 `[bash]` / `[tool:<name>]` 来源前缀，便于对照配置）。 */
   reason: string;
   details?: string[];
+  /** 会话批准记忆键用的程序标识（危险/不透明段取最严段；git 子命令为 `git:<sub>`）。 */
+  approvalId?: string;
 }
 
 export type WorkMode = "build" | "plan" | "yolo";
@@ -42,17 +43,34 @@ export interface BashDecisionRequest {
 
 const home = () => os.homedir();
 
-/** 弹窗展示用命令：空白归一化单行 + 长度截断。
- * FR-3 场景已排除外部写目标（externalTargets>0 先走 write ask），截断丢失的只是命令尾部路径，路径已单独列为 detail，安全。 */
-const COMMAND_DISPLAY_MAX = 120;
+/** 弹窗展示用命令：空白归一化单行 + 中段省略。
+ * pi-tui Text 组件支持自动折行，上限可放宽；中段省略保留头部（程序名/主要参数）与尾部（最终目标路径）。 */
+const COMMAND_DISPLAY_MAX = 400;
+const DISPLAY_HEAD = 160;
+const DISPLAY_TAIL = 200;
 function displayCommand(command: string): string {
-  const flat = command.replace(/\s+/g, " ").trim();
-  if (flat.length <= COMMAND_DISPLAY_MAX) return flat;
-  return `${flat.slice(0, COMMAND_DISPLAY_MAX)}…`;
+  const withTilde = command.replace(/\s+/g, " ").trim().replace(home(), "~");
+  if (withTilde.length <= COMMAND_DISPLAY_MAX) return withTilde;
+  const omitted = withTilde.length - DISPLAY_HEAD - DISPLAY_TAIL;
+  return `${withTilde.slice(0, DISPLAY_HEAD)} …(${omitted} chars omitted)… ${withTilde.slice(-DISPLAY_TAIL)}`;
 }
 
-/** ask 弹窗触发主体展示行：details 尾部统一加 `bash:<command>` / `tool:<tool_name>`，与 reason 前缀同源。 */
-const bashDetail = (command: string) => `bash: ${displayCommand(command)}`;
+/** 复杂命令按顶层段分行展示（≤8 行），超限回退单行中段省略。 */
+function displaySegmented(parsed: { segments: { raw: string; prevOp: string }[] }, command: string): string {
+  const segs = parsed.segments;
+  if (segs.length <= 1 || segs.length > 8) return `bash: ${displayCommand(command)}`;
+  const lines = [`bash:`];
+  for (let i = 0; i < segs.length; i++) {
+    const s = segs[i]!;
+    const prefix = i === 0 ? "  " : `  ${s.prevOp} `;
+    lines.push(`${prefix}${displayCommand(s.raw)}`);
+  }
+  return lines.join("\n");
+}
+
+/** ask 弹窗触发主体展示行：details 尾部统一加 `bash:<command>`（复杂命令分行）/ `tool:<tool_name>`，与 reason 前缀同源。 */
+const bashDetail = (command: string, parsed?: { segments: { raw: string; prevOp: string }[] }) =>
+  parsed === undefined ? `bash: ${displayCommand(command)}` : displaySegmented(parsed, command);
 
 /** trusted 外部路径前缀：配置项 ∪ 系统临时目录（os.tmpdir()），去重。 */
 function trustedPrefixes(cfg: PermissionConfig): string[] {
@@ -119,9 +137,15 @@ export function decideToolRequest(req: ToolDecisionRequest): Decision {
   }
 
   if (mode === "plan") {
-    // 1. 内置 write/edit 明确 deny（固定，不受 strictPlanMode 影响）
+    // 1. 内置 write/edit（W 类，目标单一可枚举）：跨域 → 静默 deny；信任域内敏感 → ask；其余 scratch 写 allow（与 bash 的 tee 同权同责）
     if (writeTool) {
-      return { action: "deny", rule: "FR-8", reason: `${label} plan mode forbids write operations (read-only)`, details: paths };
+      const nonTrusted = paths.filter((p) => !isTrustedPath(p, trustedPrefixes(config), cwd, home()));
+      if (nonTrusted.length > 0 || paths.length === 0) {
+        return { action: "deny", rule: "FR-8", reason: `[tool:${toolName}] Plan mode forbids writes outside trusted paths. Use /build for writes.`, details: paths.length > 0 ? paths : undefined };
+      }
+      const sensitive = sensitiveDecision(paths, cwd, config, [], label);
+      if (sensitive) return { ...sensitive, details: [...(sensitive.details ?? []), `tool:${toolName}`] };
+      return { action: "allow", rule: "FR-9", reason: `${label} plan mode trusted scratch write allowed`, details: paths };
     }
     // 2. 敏感文件 ask
     const sensitive = sensitiveDecision(paths, cwd, config, readTool ? paths : [], label);
@@ -162,19 +186,19 @@ export function decideToolRequest(req: ToolDecisionRequest): Decision {
   return { action: "allow", rule: "FR-2", reason: `${label} inside project, allowed` };
 }
 
-function failClosed(mode: WorkMode, label: string, reason: string, command?: string): Decision {
+function failClosed(mode: WorkMode, label: string, kind: string, command?: string): Decision {
+  // B+ S5 指令式文案：类别 + 改道（拆步骤、去命令替换）
+  const msg = `${label} Unverifiable syntax (${kind}). Split into simple sequential commands without $(...)`;
   return mode === "plan"
-    ? { action: "deny", rule: "FR-7", reason: `${label} plan mode ${reason} (fail-closed)` }
+    ? { action: "deny", rule: "FR-7", reason: msg }
     : {
         action: "ask",
         rule: "FR-7",
-        reason: `${label} ${reason} (fail-closed)`,
+        reason: msg,
         // ask 必须带触发命令，否则弹窗无上下文，用户无法定位问题
         details: command === undefined ? undefined : [bashDetail(command)],
       };
 }
-
-const MOST_RESTRICTIVE: Record<SegmentKind, number> = { dangerous: 2, unknown: 1, read: 0 };
 
 /**
  * 跟踪链式命令中的 cd，返回每段执行时的有效工作目录。
@@ -233,17 +257,16 @@ export function decideBashRequest(req: BashDecisionRequest): Decision {
   }
 
   // FR-7 fail-closed：语法无法解析 / 含复杂语法 → build=ask、plan=deny
-  if (parsed.parseError) return failClosed(mode, label, "unparseable command syntax", command);
+  if (parsed.parseError) return failClosed(mode, label, "unparseable", command);
   if (parsed.hasCommandSubstitution || parsed.hasProcessSubstitution || parsed.hasSubshell) {
-    return failClosed(mode, label, "command substitution / subshell / complex syntax", command);
+    return failClosed(mode, label, "command substitution/subshell", command);
   }
 
   if (parsed.segments.length === 0) {
     return { action: "allow", rule: "default", reason: `${label} empty command` };
   }
 
-  // 管道到 shell（curl | sh）fail-closed
-  if (hasPipeToShell(parsed.segments)) return failClosed(mode, label, "curl/wget piped to shell detected", command);
+  // 管道到 shell（curl | sh）：并入危险叠加，走决策表第①步
 
   // 跟踪 cd：每段的有效工作目录（cd 后相对路径按新目录解析，防 cd 到外部绕过）
   // cd 无法解析（如 `cd -`）时置 undefined，后续相对路径引用保守按外部处理
@@ -304,68 +327,99 @@ export function decideBashRequest(req: BashDecisionRequest): Decision {
   };
 
   const kinds = parsed.segments.map((seg) => classifySegment(seg, config));
-  const mostRestrictive = kinds.reduce(
-    (acc, k) => (MOST_RESTRICTIVE[k] > MOST_RESTRICTIVE[acc] ? k : acc),
-    "read" as SegmentKind,
-  );
-  const dangerous = mostRestrictive === "dangerous";
+  const dangerAny = kinds.some((k) => k.danger) || hasPipeToShell(parsed.segments);
+  const hasX = kinds.some((k) => k.tier === "X");
+  const allPureR = kinds.every((k) => k.tier === "R");
+  // 会话批准记忆 id：危险 > 不透明 > 有界写 > 纯读，取最严段的标识
+  const rankOf = (k: (typeof kinds)[number]) => (k.danger ? 3 : k.tier === "X" ? 2 : k.tier === "W" ? 1 : 0);
+  let approvalId: string | undefined;
+  let bestRank = -1;
+  for (let i = 0; i < parsed.segments.length; i++) {
+    const r = rankOf(kinds[i]!);
+    if (r > bestRank) {
+      bestRank = r;
+      approvalId = kinds[i]!.id;
+    }
+  }
 
   if (mode === "plan") {
-    // 1. 敏感操作（操作级、路径无关）→ deny
-    if (dangerous) {
-      return { action: "deny", rule: "FR-8", reason: `${label} plan mode forbids sensitive operations`, details: [command] };
+    // ① 危险叠加命中 → 静默 deny（本操作停死含变体；显式授权任务其余只读部分继续）
+    if (dangerAny) {
+      return {
+        action: "deny",
+        rule: "FR-8",
+        reason: `[bash] Dangerous op blocked in plan mode. No workarounds — switch to /build or continue read-only work.`,
+        details: [displaySegmented(parsed, command)],
+        approvalId,
+      };
     }
-    // 2. 非赎免的写 deny：写目标不在 trusted（如 /tmp）下 → deny
-    //    （含项目内写、~ 写、敏感文件写、外部非 /tmp 写，全部拒绝于此，不弹 ask）
-    if (nonTrustedWriteTargets.length > 0 || sensitiveWriteTargets.length > 0) {
-      return { action: "deny", rule: "FR-8", reason: `${label} plan mode forbids writes outside trusted temp paths`, details: [...nonTrustedWriteTargets, ...sensitiveWriteTargets] };
+    // ② 可枚举写目标 ∉ T_plan（含写 cwd 项目文件）→ 静默 deny；X 段普通参数只是引用不算
+    if (nonTrustedWriteTargets.length > 0) {
+      return {
+        action: "deny",
+        rule: "FR-8",
+        reason: `[bash] Plan mode forbids writes outside trusted paths. Continue read-only work or use /build for writes.`,
+        details: [...nonTrustedWriteTargets],
+        approvalId,
+      };
     }
-    // 3. 敏感文件 ask（此时只剩读引用 + trusted 写目标；realpath 软链仍捕获）
+    // ③ 涉及敏感文件（不分读写；能走到此处的写必然在 trusted 内）→ ask
     const sensitive = sensitiveBySegment();
-    if (sensitive) return { ...sensitive, details: [...(sensitive.details ?? []), bashDetail(command)] };
-    // 4. trusted 外部赎免（FR-9）：存在外部引用且全部落在 trusted 前缀 → 放行（未知命令读写 /tmp 验证计算）
-    if (
-      (externalRefs.length > 0 || externalTargets.length > 0) &&
-      nonTrustedExternalRefs.length === 0 &&
-      nonTrustedExternalTargets.length === 0
-    ) {
-      return { action: "allow", rule: "FR-9", reason: `${label} plan mode trusted external path allowed`, details: [...externalRefs, ...externalTargets] };
+    if (sensitive) return { ...sensitive, details: [...(sensitive.details ?? []), displaySegmented(parsed, command)], approvalId };
+    // ④ 可证安全：所有段为 R 或 W（W 写目标已由②证明全 ∈ T_plan）→ allow
+    if (!hasX) {
+      return { action: "allow", rule: "FR-8", reason: `${label} provable read/trusted-write operations allowed`, approvalId };
     }
-    // 5. read 白名单放行
-    if (mostRestrictive === "read") {
-      return { action: "allow", rule: "FR-8", reason: `${label} plan mode read-only command allowed` };
-    }
-    // 6. 未知命令：strictPlanMode deny，否则 ask（FR-8.3，与未知工具语义统一）
+    // ⑤ 真兜底：含 X 段（效果不可证明）→ strict 静默 deny / ask
     if (config.strictPlanMode) {
-      return { action: "deny", rule: "FR-8", reason: `${label} plan mode strict: non-read-only command denied`, details: [bashDetail(command)] };
+      return {
+        action: "deny",
+        rule: "FR-10",
+        reason: `[bash] Strict plan mode: unverifiable execution blocked. Use commands with provable effects, or switch to /build.`,
+        details: [displaySegmented(parsed, command)],
+        approvalId,
+      };
     }
-    return { action: "ask", rule: "FR-8", reason: `${label} plan mode non-read-only command requires confirmation`, details: [bashDetail(command)] };
+    return {
+      action: "ask",
+      rule: "FR-10",
+      reason: `[bash] opaque execution cannot be verified in plan mode — the command may write anywhere`,
+      details: [displaySegmented(parsed, command)],
+      approvalId,
+    };
   }
 
   // build 模式
-  // 1. 敏感操作 ask（项目内外同权，与路径无关）
-  if (dangerous) {
-    return { action: "ask", rule: "FR-4", reason: `${label} dangerous operation requires confirmation`, details: [bashDetail(command)] };
+  // ① 危险叠加命中 → ask
+  if (dangerAny) {
+    return { action: "ask", rule: "FR-4", reason: `${label} dangerous operation requires confirmation`, details: [bashDetail(command, parsed)], approvalId };
   }
-  // 2. 敏感文件 ask（按段 cwd；build 下写敏感文件也 ask，可确认后写）
+  // ② 涉及敏感文件（不分读写）→ ask
   const sensitive = sensitiveBySegment();
-  if (sensitive) return { ...sensitive, details: [...(sensitive.details ?? []), bashDetail(command)] };
-  // 3. cwd 内，或外部引用全部落在 trusted 前缀（如 /tmp）→ 默认放行
+  if (sensitive) return { ...sensitive, details: [...(sensitive.details ?? []), bashDetail(command, parsed)], approvalId };
+  // ③ 所有段的引用与写目标全部 ∈ T_build（cwd ∪ trusted）→ allow（R/W/X 同权）
   if (nonTrustedExternalRefs.length === 0 && nonTrustedExternalTargets.length === 0) {
-    return { action: "allow", rule: "FR-5", reason: `${label} inside project, allowed` };
+    return { action: "allow", rule: "FR-5", reason: `${label} inside trust domain, allowed`, approvalId };
   }
-  // 4. cwd 外（非 trusted）：写目标 → ask；read 白名单 → allow；other → ask
+  // ④ 纯 R（引用任意位置）→ allow
+  if (allPureR) {
+    return { action: "allow", rule: "FR-5", reason: `${label} read-only command whitelist, external path allowed`, approvalId };
+  }
+  // ⑤ 兜底：存在跨域写目标 → FR-3（按父目录记忆）；否则 X 跨域引用 → FR-10（按 program 记忆）
   if (nonTrustedExternalTargets.length > 0) {
-    return { action: "ask", rule: "FR-3", reason: `${label} writing outside project requires confirmation`, details: [...nonTrustedExternalTargets, bashDetail(command)] };
+    return {
+      action: "ask",
+      rule: "FR-3",
+      reason: `${label} writing outside project requires confirmation`,
+      details: [...nonTrustedExternalTargets, bashDetail(command, parsed)],
+      approvalId,
+    };
   }
-  if (mostRestrictive === "read") {
-    return { action: "allow", rule: "FR-5", reason: `${label} read-only command whitelist, external path allowed` };
-  }
-  // 外部路径 ask：details 首位仍是路径（approvalKey 按路径记忆，保 s 会话批准粒度），尾部追加命令展示行
   return {
     action: "ask",
-    rule: "FR-3",
-    reason: `${label} external path referenced by a non-whitelisted command requires confirmation`,
-    details: [...nonTrustedExternalRefs, bashDetail(command)],
+    rule: "FR-10",
+    reason: `${label} external path referenced by an unverifiable command requires confirmation`,
+    details: [...nonTrustedExternalRefs, bashDetail(command, parsed)],
+    approvalId,
   };
 }

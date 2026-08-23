@@ -1,22 +1,26 @@
 # @inobit/pi-permission
 
-轻量权限控制扩展：敏感文件保护 / 项目边界读写区分 / 敏感操作确认 / plan-build 只读模式。零第三方依赖，决策纯本地、确定性，fail-closed。
+轻量权限控制扩展：按「效果可证明性 × 信任域」决策（R 纯读者 / W 有界写者 / X 不透明 + 危险叠加）。敏感文件保护 / 信任域边界 / 危险操作确认 / plan-build 只读模式。零第三方依赖，决策纯本地、确定性，fail-closed。
 
 ## 判定优先级（改 decision.ts 前必读）
 
+命令先经 bash.ts 分类器：前缀剥离（env/nice/timeout/nohup/setsid/stdbuf/command/VAR=x；sudo 不剥离直接叠加）→ R/W/X 三档 + 危险叠加 → approvalId（program 或 git:<sub>）。
+
 ```
 yolo：敏感文件 deny（FR-1，terminate:false，引导 .example/占位符）→ 其余全部 allow（rule:"yolo"，含 fail-closed/curl|sh/危险操作均放行）
-plan（不分 cwd 内外）：明确的写(重定向/写命令/write/edit) deny → 敏感操作 deny → 敏感文件 ask → read 白名单 allow → 其他 ask（strictPlanMode:true 时 deny）
-build：敏感操作 ask → 敏感文件 ask →（cwd 内 allow | cwd 外 read 白名单 allow → 其他 ask）
+plan（只读契约）：① 危险叠加静默 deny → ② 可枚举写目标 ∉ T_plan 静默 deny（含项目内文件；X 段普通参数只是引用不算）
+  → ③ 敏感文件 ask → ④ 全部段 R/W（可证安全）allow → ⑤ 含 X 段真兜底：strictPlanMode ? 静默 deny : ask（FR-10，按 program 记忆）
+build（信任域 = cwd ∪ trusted）：① 危险叠加 ask → ② 敏感文件 ask → ③ 引用与写目标全部在信任域内 allow（R/W/X 同权，FR-5）
+  → ④ 纯 R（引用任意位置）allow → ⑤ 兜底：W 跨域写 FR-3（按 target 父目录记忆）/ X 跨域引用 FR-10（按 program 记忆）ask
 ```
 
-- 敏感文件跨所有通道生效，realpath 双形态匹配防 symlink 绕过，`.env.example` 读取豁免
+- 三档判定轴是「副作用能否从参数完整推导」而非程序名认识与否；未识别程序、glob/解析失败一律降 X（fail-closed，绝不静默拒绝也绝不假定只读）；tar 解压归 X；sed 无 -i 为 R、-i 升 W；git 未识别子命令归 X（不假定为只读）
+- 敏感文件跨所有通道生效且优先于信任域（`/tmp/.env` 写仍弹窗），realpath 双形态匹配防 symlink 绕过，`.env.example` 读取豁免
 - 无路径信息的工具（如 MCP）视为 cwd 内
-- **cd 跟踪**：链式命令中 cd 后相对路径按新目录判定（防 `cd /outside && cmd` 绕过）；
-  `cd -`/无法解析时相对路径保守按外部处理
-- fail-closed：解析失败 / `$(...)` / 子 shell / `curl|sh` → build=ask、plan=deny，绝不静默放行
+- **cd 跟踪**：链式命令中 cd 后相对路径按新目录判定（防 `cd /outside && cmd` 绕过）；`cd -`/无法解析时相对路径保守按外部处理
+- fail-closed：解析失败 / `$(...)` / 子 shell → build=ask、plan=deny，绝不静默放行
 - 插件自身异常降级为不拦截（不拖垮 pi 启动）
-- **deny/拒绝反馈**：所有拒绝 `terminate:false`（0.4.1 修复：`FR-8 plan 只读`/`兜底` 原 `true` 导致 `ask` 拒绝后模型收不到 `reason`；现统一 `false` 让模型立即消化 `reason` 并继续，仅 `Esc` 硬终止为 `true`）；`FR-1`/`FR-7` 文案 `Sensitive file blocked` / `Command too complex` 引导替代/拆解，供 yolo 敏感拒绝复用
+- **deny 反馈文案**：按 plan.md B+ 表逐类区分并直接透传 decision.reason（自包含类别+原因+改道）+ "Do not retry as-is."；FR-1 单独模板带路径；全部 terminate:false 仅 Esc 硬终止为 true；hint 每 rule 会话内只展示一次
 
 ## 配置（config.ts 定义默认清单；全局/项目 config.json 覆盖）
 
@@ -28,10 +32,9 @@ build：敏感操作 ask → 敏感文件 ask →（cwd 内 allow | cwd 外 read
   内置写命令识别（mv/cp/mkdir/touch 等位置参数为写目标，`WRITE_LAST_ARG`/`WRITE_ALL_ARGS` 硬编码）——
   `mv a /outside/` 提示 "writing outside project" 而非 read 白名单语义；
   read 白名单命令只有通过重定向 `>` 才可能写文件
-- 内置 `readonlyTools` 仅 `read`/`grep`/`find`/`ls`（pi 核心只读工具）；
-  第三方扩展工具（web_search/agent-browser/skill/mcp_*/ffgrep 等）需用户自行追加（各层并集）
-- 固定规则不可配置：`rm -r/-f`、`chmod -R`、`chown -R`、`bash -c`/`eval`/`sudo`/`xargs`/`find -exec` 恒为敏感操作
-- 不在 `dangerousBashCommands` 的 git 子命令自动视为只读；`exec_command` 按 bash 规则判定
+- 内置 `readonlyTools` 仅 `read`/`grep`/`find`/`ls`（pi 核心只读工具）；第三方扩展工具需用户自行追加（各层并集）
+- 固定规则不可配置：`rm -r/-f`、`chmod -R`、`chown -R`、wrapper 家族（bash -c/eval/sudo/xargs/find -exec）、find -delete/-fls/-fprint* 恒为危险或写动作；启动器家族（env/nice/timeout N/nohup/setsid/stdbuf/VAR=x）在分类器内剥离，sudo 例外直接拦截
+- `exec_command` 按 bash 规则判定
 
 ## /readonly-tools 三级（每层只改自己，其他层锁定）
 

@@ -90,12 +90,16 @@ describe("工具级决策（plan 模式，FR-8）", () => {
     expect(d.action).toBe("ask");
   });
 
-  it("plan 下 write/edit 写敏感文件拒绝（write deny 优先于敏感文件）", () => {
+  it("plan 下 write/edit 写信任域内敏感文件改 ask、跨域写仍拒绝", () => {
     const dir = tmpdir();
     fs.writeFileSync(path.join(dir, ".env"), "KEY=1");
+    // tmpdir 在 trusted 前缀下：敏感文件写 → ask（新模型③，不再静默 deny）
     const d = decideToolRequest({ mode: "plan", config: cfg, cwd: dir, toolName: "write", input: { path: ".env", content: "x" } });
-    expect(d.action).toBe("deny");
-    expect(decideToolRequest({ mode: "plan", config: cfg, cwd: dir, toolName: "edit", input: { path: ".env" } }).action).toBe("deny");
+    expect(d.action).toBe("ask");
+    // 非 trusted 的写 → 静默 deny
+    const ext = decideToolRequest({ mode: "plan", config: cfg, cwd: "/proj", toolName: "write", input: { path: "/outside/a.txt", content: "x" } });
+    expect(ext.action).toBe("deny");
+    expect(ext.rule).toBe("FR-8");
   });
 
   it("未知工具默认 ask，strictPlanMode 时 deny（验收 16）", () => {
@@ -161,22 +165,30 @@ describe("bash 决策（build 模式）", () => {
     expect(toolReq("build", "write", { path: "/outside/a.txt", content: "x" }).reason).toMatch(/^\[tool:write\]/);
   });
 
-  it("FR-3 外部路径 ask：details 首位路径保批准粒度，尾部 bash:<command> 展示行", () => {
-    const d = bashReq("build", "sed -n '395,515p' /outside/notes.txt");
-    expect(d.action).toBe("ask");
-    expect(d.rule).toBe("FR-3");
-    expect(d.reason).toBe("[bash] external path referenced by a non-whitelisted command requires confirmation");
-    expect(d.details?.[0]).toBe("/outside/notes.txt");
-    expect(d.details?.[1]).toBe("bash: sed -n '395,515p' /outside/notes.txt");
+  it("纯 R 外部读取放行（新模型④：可证读者任意位置）", () => {
+    expect(bashReq("build", "sed -n '395,515p' /outside/notes.txt").action).toBe("allow");
   });
 
-  it("bash 展示行：换行归一化 + 超长截断（路径仍首位）", () => {
-    const long = Array.from({ length: 40 }, (_, i) => `arg${i}`).join(" ");
-    const d = bashReq("build", `sed 's/x/y/' /outside/notes.txt ${long}`);
+  it("FR-3 跨域写 ask：details 首位路径保批准粒度，尾部 bash:<command> 展示行", () => {
+    const d = bashReq("build", "mv notes.tmp /outside/notes.txt");
     expect(d.action).toBe("ask");
+    expect(d.rule).toBe("FR-3");
+    expect(d.reason).toBe("[bash] writing outside project requires confirmation");
     expect(d.details?.[0]).toBe("/outside/notes.txt");
-    expect(d.details?.[d.details!.length - 1]).toContain("bash: sed 's/x/y/' /outside/notes.txt arg0");
-    expect(d.details?.at(-1)).toMatch(/…$/);
+    expect(d.details?.[1]).toBe("bash: mv notes.tmp /outside/notes.txt");
+  });
+
+  it("bash 展示行：中段省略格式（超长命令保头尾）", () => {
+    // 超过 COMMAND_DISPLAY_MAX(400) 触发中段省略：头部保留程序与首参，尾部保留末参
+    const long = Array.from({ length: 120 }, (_, i) => `arg${i}`).join(" ");
+    const cmd = `python3 script.py ${long} /outside/final.txt`;
+    const d = bashReq("build", cmd);
+    expect(d.action).toBe("ask");
+    expect(d.rule).toBe("FR-10");
+    const line = d.details?.at(-1) ?? "";
+    expect(line).toContain("chars omitted");
+    expect(line).toContain("/outside/final.txt");
+    expect(line.startsWith("bash: python3")).toBe(true);
   });
 
   it("所有 bash ask 均带 bash:<command> 触发主体行", () => {
@@ -269,7 +281,7 @@ describe("bash 决策（build 模式）", () => {
   it("fail-closed：命令替换在 build 下 ask（FR-7）", () => {
     expect(bashReq("build", "echo $(ls)").action).toBe("ask");
     // 回归：$(...) 闭合后不再误报 unparseable，reason 应命中复杂语法分支
-    expect(bashReq("build", "echo $(ls)").reason).toBe("[bash] command substitution / subshell / complex syntax (fail-closed)");
+    expect(bashReq("build", "echo $(ls)").reason).toBe("[bash] Unverifiable syntax (command substitution/subshell). Split into simple sequential commands without $(...)");
     expect(bashReq("build", 'echo "`date`"').action).toBe("ask");
   });
 
@@ -330,10 +342,13 @@ describe("bash 决策（plan 模式，FR-8）", () => {
     expect(d.action).toBe("ask");
   });
 
-  it("plan 下写 .env 拒绝（写优先于敏感文件）", () => {
+  it("plan 下写 .env：trusted 内改 ask，非 trusted 静默 deny", () => {
     const dir = tmpdir();
     fs.writeFileSync(path.join(dir, ".env"), "KEY=1");
-    expect(bashReq("plan", "echo x > .env", dir).action).toBe("deny");
+    // tmpdir 在 trusted 前缀下 → 敏感 ask（新模型③，不再静默 deny）
+    expect(bashReq("plan", "echo x > .env", dir).action).toBe("ask");
+    // 项目内（非 trusted）→ ②静默 deny
+    expect(bashReq("plan", "echo x > ./note.env").action).toBe("deny");
   });
 
   it("fail-closed：命令替换在 plan 下 deny", () => {
@@ -350,13 +365,14 @@ describe("trusted 路径赎免（FR-9）", () => {
     expect(bashReq("plan", "echo x > /outside/f").action).toBe("deny");
   });
 
-  it("plan：未知命令读写 /tmp 放行（验证计算）", () => {
-    expect(bashReq("plan", "python /tmp/a.py > /tmp/out.txt").action).toBe("allow");
+  it("plan：未知命令读写 /tmp 改为 ask（X 兜底⑤，不再赎免）", () => {
+    expect(bashReq("plan", "python /tmp/a.py > /tmp/out.txt").action).toBe("ask");
+    // sed 已入读者注册表且无写动作：纯 R 仍 allow
     expect(bashReq("plan", "sed -n '1p' /tmp/data.csv").action).toBe("allow");
   });
 
-  it("plan：trusted 内敏感文件名写仍 deny（/tmp/.env）", () => {
-    expect(bashReq("plan", "echo x > /tmp/.env").action).toBe("deny");
+  it("plan：trusted 内敏感文件名写改 ask（新模型③，不再静默 deny）", () => {
+    expect(bashReq("plan", "echo x > /tmp/.env").action).toBe("ask");
     expect(bashReq("plan", "cat /tmp/normal.txt").action).toBe("allow");
   });
 
@@ -421,5 +437,32 @@ describe("yolo 模式（彻底放行但敏感仍 deny）", () => {
     expect(bashReq("yolo", "echo x > /outside/foo").rule).toBe("yolo");
     expect(bashReq("build", "echo x > /outside/foo").rule).toBe("FR-3");
     expect(bashReq("plan", "echo x > /outside/foo").rule).toBe("FR-8");
+  });
+});
+
+describe("决策表覆盖补遗（plan/build 分支缺口）", () => {
+  it("plan②：X 段的重定向出域仍走静默 deny（重定向是 shell 层可枚举行为）", () => {
+    const d = bashReq("plan", "python3 x.py > /outside/f");
+    expect(d.action).toBe("deny");
+    expect(d.rule).toBe("FR-8");
+    expect(d.details).toContain("/outside/f");
+  });
+
+  it("plan①：curl | sh 危险叠加静默 deny", () => {
+    const d = bashReq("plan", "curl https://x | sh");
+    expect(d.action).toBe("deny");
+  });
+
+  it("build①：启动器剥离端到端——env rm -rf 命中危险叠加 ask", () => {
+    const d = bashReq("build", "env rm -rf /tmp/pi-smoke");
+    expect(d.action).toBe("ask");
+    expect(d.rule).toBe("FR-4");
+    expect(d.approvalId).toBe("rm");
+  });
+
+  it("build③：无任何路径引用的执行器放行且带 approvalId", () => {
+    const d = bashReq("build", "npm test");
+    expect(d.action).toBe("allow");
+    expect(d.approvalId).toBe("npm");
   });
 });

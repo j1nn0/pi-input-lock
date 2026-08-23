@@ -10,16 +10,26 @@ import { registerToolsCommand } from "./tools.ts";
 import { createConfirmer, type Confirmer } from "./ui.ts";
 import { createAuditor, type Auditor } from "./audit.ts";
 
-/** ask 批准的会话级记忆键。 */
-function approvalKey(decision: Decision, toolName: string, detail: string | undefined): string {
+/** 跨域写目标的会话批准记忆粒度：target 所在父目录（避免同目录反复首问）。 */
+function crossDomainParentKey(detail: string | undefined): string | undefined {
+  if (!detail) return undefined;
+  const expanded = detail.startsWith("~") ? path.join(os.homedir(), detail.slice(1)) : detail;
+  return path.dirname(expanded);
+}
+
+/** ask 批准的会话级记忆键（细粒度化：危险按 program、敏感按路径、跨域写按父目录；
+ * FR-10 额外按模式隔离 —— build 的执行器批准不得泄漏到 plan 只读契约）。 */
+function approvalKey(decision: Decision, toolName: string, detail: string | undefined, mode: string): string {
   const d = detail ?? toolName;
   switch (decision.rule) {
     case "FR-1":
       return `sensitive:${d}`;
     case "FR-3":
-      return `external-write:${d}`;
+      return `external-write:${crossDomainParentKey(d) ?? d}`;
     case "FR-4":
-      return `dangerous:${toolName}`;
+      return `dangerous:${toolName}:${decision.approvalId ?? d}`;
+    case "FR-10":
+      return `unverified:${mode}:${decision.approvalId ?? toolName}`;
     case "FR-7":
       return `fail-closed:${toolName}`;
     case "FR-8":
@@ -29,15 +39,14 @@ function approvalKey(decision: Decision, toolName: string, detail: string | unde
   }
 }
 
-/** ask 决策弹窗附带的配置建议（第 5 点：提示明确来源，便于写入配置）。 */
+/** ask 弹窗附带的配置建议（每 rule 会话内只展示一次；FR-7 已移入 deny 反馈不设弹窗 hint）。 */
 const CONFIG_HINTS: Record<string, string> = {
-  "FR-1": "Adjust sensitivePatterns to change behavior, or approve to proceed",
-  "FR-3": "Add the command to readonlyBashCommands / the tool to readonlyTools to allow silently",
-  "FR-4": "Approve to run, or remove the command from dangerousBashCommands",
-  "FR-7": "Simplify the command to avoid fail-closed prompts",
-  "FR-8": "Add the tool to readonlyTools, or switch to build mode",
+  "FR-1": "Adjust sensitivePatterns, or approve to proceed",
+  "FR-3": "Approve once, or keep write targets inside the project/trusted paths",
+  "FR-4": "'s' approves this program for the whole session",
+  "FR-10": "'s' approves this program for the session; restructuring into simpler verifiable commands is also welcome",
+  "FR-8": "Use /build for write operations",
 };
-
 /** shellTools 类别名（NFR-4）：`exec_command` 与 bash 同规则判定。 */
 function toolIsBashLike(event: ToolCallEvent): boolean {
   const input = event.input as unknown as { command?: unknown };
@@ -57,6 +66,8 @@ export default function (pi: ExtensionAPI) {
   const confirmer: Confirmer = createConfirmer();
   // 会话级批准集合：`<sessionKey>:<approvalKey>`（FR-3/FR-8.3/NFR-5 的 s 语义）
   const sessionApprovals = new Set<string>();
+  // hint 已展示标记：`<sessionKey>:<rule>`（每 rule 会话内只提示一次）
+  const sessionHintShown = new Set<string>();
   // session 层 readonly tools（`<sessionKey> -> string[]`，只存本层增量，不持久化）
   const sessionReadonlyTools = new Map<string, string[]>();
 
@@ -158,51 +169,39 @@ export default function (pi: ExtensionAPI) {
 
       if (decision.action === "allow") return undefined;
 
-      // 拒绝反馈（给模型）：所有 deny 均 terminate:false，让模型立即看到 reason 并继续处理（FR-1/FR-7 已是 false，FR-8/fallback 同步改为 false）
-      const denyFeedback = (decision: Decision, _origin: string): { block: true; reason: string; terminate: boolean } => {
+      // 拒绝反馈（给模型）：决策层 reason 自包含（类别+原因+改道）；用户拒绝（n 键）需携带「User declined」强停信号防变体重试
+      const denyFeedback = (decision: Decision, opts: { userDeclined?: boolean } = {}): { block: true; reason: string; terminate: boolean } => {
         if (decision.rule === "FR-1") {
           const p = decision.details?.[0] ?? "sensitive file";
           return {
             block: true,
-            reason: `[pi-permission] Sensitive file blocked: "${p}". Do not retry this file. Use .example, placeholders, or ask the user, and continue the task.`,
+            reason: `[pi-permission] Sensitive file "${p}" blocked. Use a .example placeholder or ask the user; do not retry.`,
             terminate: false,
           };
         }
-        if (decision.rule === "FR-7" || decision.reason.includes("fail-closed")) {
-          return {
-            block: true,
-            reason: `[pi-permission] Command too complex to verify. Do not retry as-is. Split into single steps, avoid $(...), \`( )\`, and rewrite with simpler tool calls.`,
-            terminate: false,
-          };
-        }
-        if (decision.rule === "FR-8" && decision.reason.includes("plan mode")) {
-          return {
-            block: true,
-            reason: `[pi-permission] Plan is read-only — writes blocked. Gather info with read-only tools or ask to run /build.`,
-            terminate: false,
-          };
-        }
-        return {
-          block: true,
-          reason: `[pi-permission] Permission denied (${decision.rule}). Do not retry the same operation; try a simpler approach.`,
-          terminate: false,
-        };
+        const suffix = opts.userDeclined
+          ? " User declined; do not retry this operation or variants."
+          : " Do not retry as-is.";
+        return { block: true, reason: `${decision.reason}${suffix}`, terminate: false };
       };
 
       if (decision.action === "deny") {
         auditor.review({ mode, toolName, rule: decision.rule, action: "deny", reason: decision.reason, details: decision.details, sessionId: key });
         if (ctx.hasUI) ctx.ui.notify(`[pi-permission] denied: ${decision.reason}`, "warning");
-        return denyFeedback(decision, "was");
+        return denyFeedback(decision);
       }
 
-      // ask：检查会话级批准，未批准则弹窗
-      const approveKey = approvalKey(decision, toolName, approvalDetail(decision));
+      // ask：检查会话级批准，未批准则弹窗（hint 每 rule 会话内只展示一次）
+      const approveKey = approvalKey(decision, toolName, approvalDetail(decision), mode);
       if (sessionApprovals.has(`${key}:${approveKey}`)) return undefined;
 
+      const hintKeyId = `${key}:${decision.rule}`;
+      const hintShown = sessionHintShown.has(hintKeyId);
+      sessionHintShown.add(hintKeyId);
       const choice = await confirmer.confirm(ctx, {
         title: decision.reason,
-        details: [...(decision.details ?? []), `hint: ${CONFIG_HINTS[decision.rule] ?? "approve or deny"}`],
-        dangerLevel: decision.rule === "FR-4" || decision.rule === "FR-7" ? "danger" : "warning",
+        details: [...(decision.details ?? []), ...(hintShown ? [] : [`hint: ${CONFIG_HINTS[decision.rule] ?? "approve or deny"}`])],
+        dangerLevel: decision.rule === "FR-4" || decision.rule === "FR-10" ? "danger" : "warning",
       });
       if (choice === "yes" || choice === "session") {
         if (choice === "session") sessionApprovals.add(`${key}:${approveKey}`);
@@ -239,7 +238,7 @@ export default function (pi: ExtensionAPI) {
         return { block: true, reason: `[pi-permission] User denied: ${customReason}`, terminate: false };
       }
       auditor.review({ mode, toolName, rule: decision.rule, action: "deny", reason: decision.reason, details: decision.details, sessionId: key });
-      return denyFeedback(decision, "by user");
+      return denyFeedback(decision, { userDeclined: true });
     } catch {
       // FR-7：插件自身异常不拦截，降级为放行
       return undefined;

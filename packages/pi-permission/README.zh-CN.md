@@ -2,12 +2,24 @@
 
 [English](./README.md) | **中文**
 
-轻量权限控制扩展，用于 [Pi coding agent](https://pi.dev)。只做四件事，其余一概不打扰：
+轻量权限控制扩展，用于 [Pi coding agent](https://pi.dev)。按「效果可证明性」分档决策，只拦该拦的，其余一概不打扰：
 
-1. **敏感文件保护**：`.env`、`.ssh/*`、`*.pem` 等敏感文件，任何通道（工具/bash）的读与写都弹窗确认。
-2. **项目边界**：项目外（cwd 外）读取走 read 白名单（命中放行、其余 ask），写入需确认。
-3. **敏感操作确认**：`git push`/`git reset --hard`、`rm -rf`、`sudo`、`curl | sh` 等始终确认。
-4. **plan/build 模式**：`/plan` 只读（写操作拒绝），`/build` 回到正常模式。
+1. **敏感文件保护**：`.env`、`~/.ssh/*`、`*.pem`、`.npmrc`、`~/.config/gh/hosts.yml` 等，任何通道（工具/bash）的读与写都弹窗确认。
+2. **信任域边界**：plan 只读（跨域写静默拒绝）；build 下信任域 = 项目目录 ∪ trusted 路径，域内放行、跨域设门。
+3. **危险操作确认**：`git push`/`rm -rf`、`sudo`、`curl | sh` 等危险叠加始终确认；不可证执行（解释器/未知程序）在 plan 下确认、build 域内放行。
+4. **plan/build 模式**：`/plan` 只读（跨域写静默拒绝），`/build` 回到正常模式。
+
+## 效果分类模型（R/W/X）
+
+命令按「副作用能否从参数完整推导」分三档，另加一层危险叠加：
+
+| 档 | 判定 | 例子 |
+| -- | ---- | ---- |
+| **R 纯读者** | 无文件副作用 | cat/grep/jq/git status/sort(无 -o) |
+| **W 有界写者** | 写目标可从参数穷举（可解析） | touch/mkdir/cp/mv/sed -i/重定向/find -delete |
+| **X 不透明** | 效果不可从参数推导——解释器、构建工具、一切未识别程序与解析失败降级 | python3/npm/make/bash -c/tar 解压/patch |
+
+危险叠加（rm -r/-f、chmod/chown -R、git 写子命令、curl\|sh、sudo、bash -c、xargs、find -exec）凌驾于档位之上，维持既有产品契约。
 
 ## 特性
 
@@ -36,13 +48,36 @@ pi install npm:@inobit/pi-permission
 - **切换快捷键**：`Alt+P` 在 plan/build 之间循环切换（可在 `toggleModeShortcut` 配置中改为其他键位，空字符串禁用，键位格式见 pi [keybindings](https://pi.dev/docs/keybindings)）
 - 状态栏：`Plan` 绿 / `Build` 红（主题色），键名 `pi-permission-mode`
 
-## 判定优先级（从高到低）
+## 核心决策路径
 
-**yolo 模式**：敏感文件 → deny（`terminate:false`，`Sensitive file blocked` 引导走 `.example`/占位符）；其余全部 → allow（`rule:"yolo"`，含 `fail-closed`/`curl|sh`/危险操作均放行）
+### plan 模式（只读契约）
 
-**plan 模式**（不分 cwd 内外）：敏感操作 → deny；非豁免的写（写目标不在 trusted 下，含敏感文件写）→ deny；敏感文件 → ask；trusted 路径（如 `/tmp`）读写 → allow；read 白名单 → allow；其他 → ask（`strictPlanMode` 时 deny）
+```
+危险叠加命中（rm -rf / git push / sudo / curl|sh …）      → 静默 deny
+可枚举写目标超出信任域 T_plan（含项目内文件）               → 静默 deny
+涉及敏感文件（读或写）                                     → ask
+全部段为 R 或 W（写目标已证明全在信任域内）                 → allow
+含 X 段真兜底（解释器/未知程序/解析失败降级）               → strict ? 静默 deny : ask
+```
 
-**build 模式**：敏感操作 ask → 敏感文件 ask →（cwd 内或全部外部引用落在 trusted 下 → allow；cwd 外 read 白名单 allow → 其他 ask）
+### build 模式
+
+```
+危险叠加命中                                              → ask
+涉及敏感文件（读或写）                                     → ask
+所有段的引用与写目标全部 ∈ 信任域 T_build（cwd ∪ trusted）  → allow（R/W/X 同权）
+纯 R（引用任意位置）                                       → allow
+其余（W/X 存在跨域引用）                                   → ask
+```
+
+前置层：语法解析失败 / `$()` / 子 shell / 进程替换 → fail-closed（build=ask，plan=deny），不进上表。yolo 模式跳过全部判定直接放行，仅敏感文件仍 deny。ask 弹窗选 `s` 按 program/path/父目录粒度会话内免问；hint 每 rule 会话内只提示一次。
+
+## 威胁模型与残余风险（务必知悉）
+
+- build 信任域内放行 = 接受域内任意代码执行的完整能力包。脚本内容可以隐形跨越信任域（写 `~/.ssh`、联网）——权限系统看到的是命令表面而非代码行为。**本扩展是进程内规则层，不是沙箱**；真隔离请用容器/一次性环境
+- W 类安全性 = 目标枚举的正确性；冷门语法解析失败会保守降级为 X，但枚举 bug 本身会成为误放行
+- TOCTOU/符号链接竞态仅能缓解不能根除；多用户机器上 `/tmp` 世界可写
+- plan 无任何执行器豁免机制：X 段一律 ask（strict 下静默 deny），只读契约完整
 
 ## 配置
 
@@ -56,7 +91,7 @@ pi install npm:@inobit/pi-permission
 
 | 字段 | 含义 | 默认 |
 | -- | ---- | ---- |
-| `sensitivePatterns` | 敏感文件 glob 清单 | `*.env` `*.env.*` `~/.ssh/*` `*.pem` `*.key` `id_rsa*` `credentials.json` `secrets*.yaml` `~/.aws/*` `.npmrc` |
+| `sensitivePatterns` | 敏感文件 glob 清单 | `*.env` `*.env.*` `~/.ssh/*` `*.pem` `*.key` `id_rsa*` `credentials.json` `secrets*.yaml` `~/.aws/*` `.npmrc` `~/.config/gh/hosts.yml` |
 | `envExampleReadAllowed` | `.env.example` 读取免弹窗 | `true` |
 | `readonlyBashCommands` | bash read 白名单 | 高频只读命令（cat/grep/ls/...，约 70 项） |
 | `dangerousBashCommands` | 敏感操作统一清单（`sudo` 或 `git commit`） | git 写子命令 + 危险 shell |
@@ -69,15 +104,13 @@ pi install npm:@inobit/pi-permission
 | `logDir` | 日志目录（相对 `~/.pi/agent`，尊重 `PI_CODING_AGENT_DIR`；支持绝对路径与 `~/`，0600；扩展目录仅放配置） | `logs/pi-permission` |
 
 > 固定规则（不可配置）：内置写工具 `write`/`edit`、`rm -r/-f`、`chmod -R`、`chown -R`、
-> `curl/wget | sh/bash`、`bash -c`/`eval`/`sudo`/`xargs`/`find -exec` 恒为敏感操作；
-> 重定向 `>`/`>>` 写目标固定检测；不在 `dangerousBashCommands` 的 git 子命令自动视为只读。
-> 弹窗 reason 带 `[bash]` / `[tool:<name>]` 来源前缀并附配置建议。
+> `curl/wget | sh/bash`、`bash -c`/`eval`/`sudo`/`xargs`/`find -exec`、`find -delete/-fls/-fprint*` 恒为敏感操作或写动作；
+> 重定向 `>`/`>>` 写目标固定检测；启动器前缀（`env`/`nice`/`timeout N`/`nohup`/`setsid`/`stdbuf`/`VAR=x`）自动剥离后按真实程序分类（`sudo` 不剥离直接拦截）；git 未识别子命令按 X 处理。
+> 弹窗 reason 带 `[bash]` / `[tool:<name>]` 来源前缀；hint 每 rule 会话内只展示一次。
 >
 > **日志位置**：默认 `~/.pi/agent/logs/pi-permission/<project>/pi-permission-{review,debug}.jsonl`（更规范，与 `pi-debug.log` 同级），按项目分目录隔离，文件 `0600`、目录 `0700`、支持大小轮转。扩展目录 `~/.pi/agent/extensions/pi-permission` 仅放 `config.json`。自定义可用绝对路径或 `~/`，如 `"logDir": "~/my-logs/pi-permission"` 或 `"/var/log/pi-permission"`。
 >
-> **trusted 豁免边界**：只放行"目录边界"，永远排在危险/敏感判定之后——即使位于 trusted 目录内，
-> 命中敏感文件名的写入（如 `/tmp/.env`、cwd 恰在 `/tmp` 下写 `.env`）plan 下仍 deny、build 下仍 ask；
-> 危险命令（`sudo rm -rf /tmp` 等）与路径无关，始终先于 trusted 拦截；realpath 双形态防软链逃逸。
+> **信任域边界**：敏感判定永远优先于信任域——即使位于 trusted 目录内，命中敏感文件的写入（如 `/tmp/.env`）plan/build 下均弹窗确认；危险命令与路径无关，始终最先拦截；realpath 双形态防软链逃逸。
 
 ## 询问弹窗（Ask Dialog）
 

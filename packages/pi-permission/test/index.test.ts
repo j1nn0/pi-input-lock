@@ -125,7 +125,7 @@ describe("index.ts 工厂装配", () => {
     };
     const result = await pi.emit("tool_call", event, makeCtx(dir));
     expect(result).toMatchObject({ block: true });
-    expect(String((result as { reason?: string }).reason)).toContain("pi-permission");
+    expect(String((result as { reason?: string }).reason)).toContain("dangerous operation requires confirmation");
   });
 
   it("高频只读命令放行", async () => {
@@ -142,7 +142,7 @@ describe("index.ts 工厂装配", () => {
     expect(result).toBeUndefined();
   });
 
-  it("写工具在 plan 模式下被拒绝", async () => {
+  it("写工具在 plan 模式：trusted 区放行（scratch），跨域静默拒绝", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-permission-factory-"));
     const pi = makePi(dir);
     factory(pi as never);
@@ -150,16 +150,26 @@ describe("index.ts 工厂装配", () => {
     // 先切换到 plan
     const planCmd = pi.commands.get("plan")!;
     await planCmd.handler("", ctx as never);
-    const event = {
+    // trusted 区（tmpdir）scratch 写 → 放行（新模型：W 类目标可枚举且在信任域内）
+    const okEvent = {
       type: "tool_call",
       toolCallId: "2",
       toolName: "write",
       input: { path: path.join(dir, "x.txt"), content: "x" },
     };
-    const result = await pi.emit("tool_call", event, ctx) as { block: boolean; reason: string; terminate?: boolean };
+    const ok = await pi.emit("tool_call", okEvent, ctx) as { block?: boolean };
+    expect(ok?.block ?? false).toBe(false);
+    // 跨域写 → 静默 deny
+    const denyEvent = {
+      type: "tool_call",
+      toolCallId: "3",
+      toolName: "write",
+      input: { path: "/outside/x.txt", content: "x" },
+    };
+    const result = await pi.emit("tool_call", denyEvent, ctx) as { block: boolean; reason: string; terminate?: boolean };
     expect(result).toMatchObject({ block: true });
     expect(result.terminate).toBe(false);
-    expect(result.reason).toMatch(/Plan is read-only/);
+    expect(result.reason).toContain("forbids writes outside trusted paths");
   });
 
   it("plan 模式注入只读系统提示", async () => {
@@ -404,8 +414,8 @@ describe("index.ts 工厂装配", () => {
     }, ctx) as { block: boolean; reason: string; terminate?: boolean };
     expect(result.block).toBe(true);
     expect(result.terminate).toBe(false);
-    expect(result.reason).toMatch(/Permission denied/);
-    expect(result.reason).toMatch(/try a simpler approach/);
+    expect(result.reason).toMatch(/User declined; do not retry this operation or variants/);
+    expect(result.reason).toMatch(/dangerous operation requires confirmation/);
   });
 
   it("直接 deny 同样带勿重试反馈", async () => {
@@ -423,7 +433,7 @@ describe("index.ts 工厂装配", () => {
     }, ctx) as { block: boolean; reason: string; terminate?: boolean };
     expect(result.block).toBe(true);
     expect(result.terminate).toBe(false);
-    expect(result.reason).toMatch(/Plan is read-only/);
+    expect(result.reason).toMatch(/switch to \/build/);
   });
 
   it("注册 /yolo 命令且需二次确认", async () => {
@@ -482,7 +492,7 @@ describe("index.ts 工厂装配", () => {
     }, ctxYolo) as { block: boolean; reason: string; terminate?: boolean };
     expect(result.block).toBe(true);
     expect(result.terminate).toBe(false);
-    expect(result.reason).toMatch(/Sensitive file blocked/);
+    expect(result.reason).toMatch(/Sensitive file/);
     // yolo 下非敏感写放行
     const ok = await pi.emit("tool_call", {
       type: "tool_call",
@@ -606,7 +616,7 @@ describe("deny with reason 交互（ask 扩展）", () => {
       ctx,
     )) as { block: boolean; reason: string; terminate: boolean };
     expect(selectCalls).toBe(2);
-    expect(result.reason).toMatch(/Permission denied/);
+    expect(result.reason).toMatch(/User declined; do not retry this operation or variants/);
     expect(result.terminate).toBe(false);
   });
 
@@ -660,7 +670,7 @@ describe("deny with reason 交互（ask 扩展）", () => {
     )) as { block: boolean; reason: string };
     expect(result.block).toBe(true);
     expect(inputCalled).toBe(false);
-    expect(result.reason).toMatch(/Permission denied/);
+    expect(result.reason).toMatch(/User declined; do not retry this operation or variants/);
   });
 
   it("审计截断：超长 customReason 被 capFieldWidths 截断", async () => {
@@ -690,5 +700,38 @@ describe("deny with reason 交互（ask 扩展）", () => {
     const entry = JSON.parse(content.trim().split("\n").at(-1)!);
     expect(entry.customReason.length).toBeLessThan(long.length);
     expect(entry.customReason).toMatch(/\[truncated\]/);
+  });
+});
+describe("FR-10 批准键模式隔离（回归：build 批准不得泄漏到 plan）", () => {
+  it("build 下选 s 批准 python3 后，plan 下同程序仍 ask", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-permission-factory-"));
+    const pi = makePi(dir);
+    factory(pi as never);
+    const ctx = makeCtx(dir);
+    ctx.hasUI = true; // 否则 confirmer 无 UI 降级拒绝，不经过 select
+    // build 下 FR-10 ask（跨域 X 引用）→ 选 s
+    ctx.ui.select = async () => "s: allow session";
+    const buildEvent = {
+      type: "tool_call",
+      toolCallId: "b1",
+      toolName: "bash",
+      input: { command: "python3 ~/smoke-leak.py" },
+    };
+    await pi.emit("tool_call", buildEvent, ctx);
+    // 同会话切 plan 后，同程序 X 命令必须仍然 ask（而非静默放行）
+    await pi.commands.get("plan")!.handler("", ctx);
+    let asked = false;
+    ctx.ui.select = async () => {
+      asked = true;
+      return "n: deny";
+    };
+    const planEvent = {
+      type: "tool_call",
+      toolCallId: "p1",
+      toolName: "bash",
+      input: { command: "python3 /tmp/smoke-leak.py" },
+    };
+    await pi.emit("tool_call", planEvent, ctx);
+    expect(asked).toBe(true);
   });
 });

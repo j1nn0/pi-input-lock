@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.0.0] - 2026-08-22
+
+### BREAKING（默认行为变更，升级前必读）
+
+- **决策模型重构**：按「效果可证明性」分 R 纯读者 / W 有界写者 / X 不透明三档 + 危险叠加，取代旧 read/unknown 二档；信任域公式化 T_plan = trustedExternalPaths、T_build = cwd ∪ trustedExternalPaths
+- **build 模式未知命令不再静默放行**：含 X 段（解释器/构建工具/未识别程序）且存在跨域引用时改为 ask（FR-10）；域内仍全量放行
+- **plan 模式**：trusted 区内敏感文件写由静默 deny 改为 ask（如 `echo x > /tmp/.env`）；X 段一律 ask（strictPlanMode 时静默 deny），不再存在执行器赎免
+- **tar 由 W 改判 X**：解压目标由包内容决定不可枚举（旧实现误枚举命令行参数）；plan 下由 allow 变 ask
+- **git 未识别子命令由假只读改判 X**
+- `find -delete/-fls/-fprint*` 并入写动作检测（无独立开关，回滚需回退版本）
+
+### Added
+
+- 启动器前缀剥离（env/nice/timeout N/nohup/setsid/stdbuf/command/VAR=x）：`env rm -rf x` 正确归类为 rm（根治白名单绕过）；sudo 不剥离直接拦截
+- 会话批准记忆细粒度化：危险/X 按 program、敏感按 path、跨域写按 target 父目录（旧版 FR-4 键忽略具体命令，任一危险命令选 session 即全会话豁免所有 FR-4）
+- 弹窗 hint 每 rule 会话内只展示一次；deny 反馈按场景逐类区分文案（token -29%）并直接透传决策层自包含 reason
+- 弹窗命令展示：中段省略替代 120 字符硬截断（上限 ~400，保头尾）、复杂命令按段分行 ≤8 行、home 压缩为 ~
+- sensitivePatterns 新增 `~/.config/gh/hosts.yml`（gh CLI 凭据）；读者注册表新增 sed/jq
+
+### Changed
+
+- 决策表顺序：plan ④ 可证安全 allow 前置、⑤ X 兜底收尾（与 build 表结构对称）；yolo 分支语义不变（敏感仍 deny）
+- 工具侧 write/edit 在 plan 下信任域内 scratch 写放行（与 bash 的 tee 同权同责），跨域静默 deny
+
+### Fixed
+
+- git 未识别子命令不再假定只读（原「不在清单视为只读」属假只读漏洞）
+- sed 从「全参数视为写目标」修正为仅 `-i` 时写入
+
 ## [0.4.1] - 2026-08-21
 
 ### Fixed

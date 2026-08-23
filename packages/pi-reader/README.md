@@ -47,15 +47,11 @@ pi -ne -e ./packages/pi-reader --tui-mode fullscreen
 
 ## Configuration
 
-- Reading toggle: `extensions/pi-reader/config.json` (`config.json` is `gitignore`d)
+- Reading toggle: `extensions/pi-reader/config.json`
   ```json
   { "toggleKey": "alt+o", "autoExpandTools": true, "questionAnchor": "pinTop", "visibleBehavior": "keep", "wrapNavigation": false }
   ```
   `autoExpandTools`: `true` (default) auto expands/collapses tool output on toggle; `false` keeps tool state untouched (position is then naturally lossless). Others: `questionAnchor`: `pinTop` (=1, default) | `third` (=floor(vh/3)) | `center` (=floor(vh/2)) | `number`; `visibleBehavior`: `keep` (default, keep viewport if target already visible, flash only) | `reanchor`; `wrapNavigation`: wrap at ends. `?` popup shows the effective toggle key.
-- Tool expand: `~/.pi/agent/keybindings.json`
-  ```json
-  { "app.tools.expand": "alt+o" }
-  ```
 
 ## Behavior
 

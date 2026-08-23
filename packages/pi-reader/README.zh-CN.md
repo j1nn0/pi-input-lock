@@ -47,15 +47,11 @@ pi -ne -e ./packages/pi-reader --tui-mode fullscreen
 
 ## 配置
 
-- 阅读切换：`extensions/pi-reader/config.json`（`config.json` 已 `gitignore`）
+- 阅读切换：`extensions/pi-reader/config.json`
   ```json
   { "toggleKey": "alt+o", "autoExpandTools": true, "questionAnchor": "pinTop", "visibleBehavior": "keep", "wrapNavigation": false }
   ```
   `autoExpandTools`：`true`（默认）进出阅读时自动展开/收拢工具输出；`false` 保持工具状态不动（此时位置天然无损）。其余同下；`questionAnchor`：`pinTop`（=1，默认）| `third`（=floor(vh/3)）| `center`（=floor(vh/2)）| 数字；`visibleBehavior`：`keep`（默认，目标已可见则不动视口仅 flash）| `reanchor`；`wrapNavigation`：首尾回绕。`?` 弹窗显示生效键
-- 工具展开：`~/.pi/agent/keybindings.json`
-  ```json
-  { "app.tools.expand": "alt+o" }
-  ```
 
 ## 行为
 

@@ -41,6 +41,8 @@ export interface NavConfig {
   questionAnchor?: Anchor;
   visibleBehavior?: VisibleBehavior;
   wrapNavigation?: boolean;
+  /** 切换阅读模式时是否自动展开/收拢工具输出（plan §9.1）；未配置默认 true */
+  autoExpandTools?: boolean;
 }
 
 /** 计算锚定偏移量 */
@@ -295,6 +297,170 @@ export function scrollToAnchor(tui: any, targetRow: number, anchor: Anchor, visi
   } catch { return false; }
 }
 
+// ---------- 滚动锚点（模式切换保位，可单测；设计见 plan.md §4/§5） ----------
+
+/** 滚动锚点：prompt 序号坐标系。展开/收起只改段内行数、不增删消息边界，k 跨切换严格稳定 */
+export interface ScrollAnchor {
+  /** 视口顶行上方最近的 prompt 序号（findPromptRows 下标）；-1 表示位于首个 prompt 之前的头部区域 */
+  k: number;
+  /** 视口顶行距该锚点的行偏移（同段内偏移；k=-1 时为距文档顶距离） */
+  d: number;
+  /** 全文 prompt 总数，恢复时 O(1) 校验聊天树是否重建 */
+  count: number;
+}
+
+/**
+ * 捕获滚动锚点：记录视口顶行相对最近 prompt 边界的位置。
+ * @param lines 完整拍平内容行（getViewportState().lines）
+ * @param scrollTop 视口顶行的绝对行号
+ * @returns 行数组为空或全文无 prompt 时返回 null（无法建立锚点）
+ */
+export function captureAnchor(lines: string[] | null, scrollTop: number): ScrollAnchor | null {
+  if (!lines || lines.length === 0) return null;
+  if (!Number.isFinite(scrollTop) || scrollTop < 0) return null;
+  const promptRows = findPromptRows(lines);
+  if (promptRows.length === 0) return null;
+  // 二分找 ≤ scrollTop 的最后一个 prompt
+  let lo = 0;
+  let hi = promptRows.length - 1;
+  let idx = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if ((promptRows[mid] ?? 0) <= scrollTop) { idx = mid; lo = mid + 1; } else { hi = mid - 1; }
+  }
+  if (idx < 0) return { k: -1, d: Math.trunc(scrollTop), count: promptRows.length };
+  return { k: idx, d: scrollTop - (promptRows[idx] ?? 0), count: promptRows.length };
+}
+
+/**
+ * 计算恢复目标行（统一 clamp 模型：scrollTop' = clamp(base + d', 0, maxTop)，见 plan §5）。
+ *
+ * 先做 O(1) 结构校验：prompt 总数与捕获时不一致说明聊天树已重建，放弃恢复。
+ * d 截断顺序：先夹进所在段（不超过下个 prompt），再整体夹进 [0, maxTop]——
+ * 保证目标要么精确还原、要么落在同一问答边界内、要么贴底且仍在屏内。
+ *
+ * @param newLines 变更后的完整内容行
+ * @param anchor 之前 captureAnchor 的产物
+ * @param vh 视口高度（计算 maxTop 用）
+ * @returns null 表示放弃恢复（结构变化或输入无效）；否则为绝对目标行号
+ */
+export function computeRestoreRow(newLines: string[] | null, anchor: ScrollAnchor, vh: number): number | null {
+  if (!newLines || newLines.length === 0 || !anchor) return null;
+  if (!Number.isFinite(vh) || vh < 1) return null;
+  const promptRows = findPromptRows(newLines);
+  if (promptRows.length !== anchor.count) return null;
+  const maxTop = Math.max(0, newLines.length - Math.floor(vh));
+  let base: number;
+  let segEnd: number; // 所在段的结束界（不含）
+  if (anchor.k < 0) {
+    base = 0;
+    segEnd = promptRows[0] ?? newLines.length;
+  } else {
+    const row = promptRows[anchor.k];
+    if (row === undefined) return null;
+    base = row;
+    const next = promptRows[anchor.k + 1];
+    segEnd = next === undefined ? newLines.length : next;
+  }
+  const dClamped = Math.min(Math.max(0, anchor.d), Math.max(0, segEnd - 1 - base));
+  return Math.max(0, Math.min(base + dClamped, maxTop));
+}
+
+export interface ScrollRestoreMonitorOptions {
+  /** 发起时的代际号；轮询期间不一致说明有新的高度变更动作，立即放弃 */
+  generation: number;
+  /** 当前代际号读取器 */
+  getGeneration: () => number;
+  /** 当前帧对象读取器（currentLayout 引用，换代即证明发生重排） */
+  getFrame: () => unknown;
+  /** 当前内容高度读取器 */
+  getContentHeight: () => number;
+  /** 布局稳定后的恢复回调（至多触发一次） */
+  onRestore: () => void;
+  /** 每次 tick 前主动请求一次渲染：pi-tui 按需渲染，空闲时零帧，
+   *  不主动推进则“两个新帧”判据可能永远不满足（冒烟实测缺陷） */
+  requestRender?: () => void;
+  /** 轮询间隔 ms，默认 16 */
+  intervalMs?: number;
+  /** 最大轮询次数，默认 20，超限放弃 */
+  maxTicks?: number;
+}
+
+/**
+ * 恢复监视器：等布局稳定后执行一次恢复回调（plan §6 步骤③）。
+ * 三重条件：generation 未变、currentLayout 帧代际变化、contentHeight 连续两个新帧相同。
+ * 轮询默认 16ms/tick、上限 20 次，超限静默放弃（与包内降级策略一致）。
+ */
+export class ScrollRestoreMonitor {
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private ticks = 0;
+  private prevFrame: unknown;
+  private seenNewFrame = false;
+  private lastHeight: number | null = null;
+  private finished = false;
+
+  constructor(private readonly o: ScrollRestoreMonitorOptions) {}
+
+  /** 启动轮询；已启动/已完成时无效果 */
+  start(): void {
+    if (this.finished || this.timer !== undefined) return;
+    this.prevFrame = this.safe(this.o.getFrame);
+    this.schedule();
+  }
+
+  /** 中止轮询（含未决 timer） */
+  stop(): void {
+    this.finished = true;
+    if (this.timer !== undefined) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+  }
+
+  private schedule(): void {
+    if (this.finished) return;
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      this.tick();
+    }, this.o.intervalMs ?? 16);
+  }
+
+  private tick(): void {
+    if (this.finished) return;
+    try {
+      if (this.o.getGeneration() !== this.o.generation) {
+        this.stop();
+        return;
+      }
+      try { this.o.requestRender?.(); } catch {}
+      const frame = this.safe(this.o.getFrame);
+      if (frame !== this.prevFrame) {
+        const h = this.safe(this.o.getContentHeight);
+        // 需要两个“不同帧”采样到相同高度才算稳定；采样失败（null）视为不稳定
+        if (this.seenNewFrame && h !== null && h === this.lastHeight) {
+          this.finished = true;
+          this.stop();
+          this.o.onRestore();
+          return;
+        }
+        this.seenNewFrame = true;
+        this.lastHeight = h;
+      }
+      this.prevFrame = frame;
+    } catch { /* 防御：单次轮询异常不中断 */ }
+    this.ticks += 1;
+    if (this.ticks >= (this.o.maxTicks ?? 20)) {
+      this.stop();
+      return;
+    }
+    this.schedule();
+  }
+
+  private safe<T>(fn: () => T): T | null {
+    try { return fn(); } catch { return null; }
+  }
+}
+
 // ---------- toggleKey / NavConfig 缓存（启动时加载，修改后需 reload / 重启 pi 生效，无 TTL） ----------
 let cachedToggleKeyRaw: string | undefined;
 let hasToggleKeyCache = false;
@@ -307,11 +473,21 @@ function readConfigJson(): any {
     const fs: any = (globalThis as any).require?.("fs") ?? (globalThis as any).process?.getBuiltinModule?.("fs");
     if (!fs) return undefined;
     try {
-      const url = (import.meta as any).url ?? "";
-      const curDir = url ? (globalThis as any).require?.("path")?.dirname?.(new URL(url).pathname) ?? "" : "";
-      const cfg1 = curDir ? (globalThis as any).require?.("path")?.join?.(curDir, "config.json") : "";
-      if (cfg1 && fs?.existsSync?.(cfg1)) {
-        return JSON.parse(fs.readFileSync(cfg1, "utf8"));
+      // jiti 会把模块编译为 base64 data:URL（import.meta.url 拿不到文件路径），
+      // 但 CJS 包装作用域注入了 __dirname（实测可用）；从 src/ 加载时取父级即包目录
+      let baseDir = "";
+      try {
+        baseDir = (typeof __dirname !== "undefined" && __dirname) ? __dirname : "";
+      } catch {}
+      const path: any = (globalThis as any).require?.("path") ?? (globalThis as any).process?.getBuiltinModule?.("path");
+      const candidates = [
+        baseDir ? path?.join?.(baseDir, "..", "config.json") : "",
+        baseDir ? path?.join?.(baseDir, "config.json") : "",
+      ];
+      for (const cfg of candidates) {
+        if (cfg && fs?.existsSync?.(cfg)) {
+          return JSON.parse(fs.readFileSync(cfg, "utf8"));
+        }
       }
     } catch {}
     const path: any = (globalThis as any).require?.("path") ?? (globalThis as any).process?.getBuiltinModule?.("path");
@@ -352,6 +528,7 @@ function readNavConfigRaw(): NavConfig {
   if (j.questionAnchor !== undefined) out.questionAnchor = j.questionAnchor as Anchor;
   if (j.visibleBehavior !== undefined) out.visibleBehavior = j.visibleBehavior as VisibleBehavior;
   if (j.wrapNavigation !== undefined) out.wrapNavigation = Boolean(j.wrapNavigation);
+  if (j.autoExpandTools !== undefined) out.autoExpandTools = Boolean(j.autoExpandTools);
   return out;
 }
 
@@ -360,6 +537,15 @@ export function getNavConfigCached(): NavConfig {
   cachedNavConfig = readNavConfigRaw();
   hasNavCache = true;
   return cachedNavConfig ?? {};
+}
+
+/**
+ * 需求 A：模式切换时是否自动展开/收拢工具输出（plan §9.1）。
+ * 默认值在消费侧兜底为 true——VITEST 分支返回空配置时同样生效，防测试基线漂移。
+ */
+export function isAutoExpandToolsEnabled(): boolean {
+  const v = getNavConfigCached().autoExpandTools;
+  return v === undefined ? true : v;
 }
 
 export function __resetNavConfigCacheForTest(): void {
@@ -581,6 +767,14 @@ export default function (pi: ExtensionAPI) {
   let ctxBroken = false;
   let savedInput = "";
   let latestTui: TUI | undefined;
+  // 需求 B：最近一次 factory 收到的应用级 keybindings（terminal 通道回调无 kb 入参，需在外层记账）
+  let latestKb: any;
+  // 工具展开状态本地镜像：核心 ui context 无读取 getter，扩展发起的每次变更在此记账；
+  // null 表示尚未得知（首次推导规则见 applyReaderUI）。已知限制：编辑态由核心路径
+  // （actionHandler 等）切换工具输出时镜像不感知会漂移，进入 READING 后即重新对齐。
+  let toolsExpandedMirror: boolean | null = null;
+  // 滚动恢复代际号：每次新的高度变更动作递增，作废在途监视器（防快速连按竞态）
+  let scrollGen = 0;
   let offTerminalInput: (() => void) | undefined;
   // inputListener 只安装一次：mainFactory 退出阅读恢复时会再次被调用，防止重复拦截。
   let listenerInstalled = false;
@@ -992,7 +1186,7 @@ export default function (pi: ExtensionAPI) {
   // ? 帮助弹窗内容：key 列 + 描述列，统一固定宽度对齐，保证盒子整齐可读
   const getHelpEntries = (): Array<[string, string]> => {
     const toggle = getActiveToggleLabel();
-    return [
+    const entries: Array<[string, string]> = [
       [toggle, "Toggle reading mode"],
       ["Ctrl+U / Ctrl+D", "Half page up / down"],
       ["Ctrl+F / Ctrl+B", "Page down / up"],
@@ -1007,6 +1201,14 @@ export default function (pi: ExtensionAPI) {
       ["Esc / i / Ctrl+C", "Exit reading mode"],
       ["?", "Show this help"],
     ];
+    // 需求 B：动态插入 app.tools.expand 键位行（拿不到键位则隐藏该行，plan §9.2）
+    try {
+      const keys: string[] = latestKb?.getKeys?.("app.tools.expand") ?? [];
+      if (keys.length > 0) {
+        entries.splice(1, 0, [keys.join("/"), "Toggle tool output (edit & reading)"]);
+      }
+    } catch { /* 拿不到则隐藏 */ }
+    return entries;
   };
 
   let helpOpen = false;
@@ -1065,6 +1267,71 @@ export default function (pi: ExtensionAPI) {
     }, { overlay: true, overlayOptions: { anchor: "center" as any } } as any)?.then(() => { helpOpen = false; }).catch(() => { helpOpen = false; });
   };
 
+  // 滚动恢复代际号递增：作废在途监视器，返回新号
+  const advanceScrollGen = (): number => {
+    scrollGen += 1;
+    return scrollGen;
+  };
+
+  /** 守卫链捕获（plan §6）：scrollView 存在？lines 存在？非贴底跟随态？任一失败返回 null */
+  const tryCaptureAnchor = (): ScrollAnchor | null => {
+    try {
+      const tui: any = latestTui;
+      if (!tui) return null;
+      const sv: any = tui.currentLayout?.primaryScrollView ?? tui.getPrimaryScrollView?.() ?? null;
+      if (!sv) return null;
+      try { if (sv.isFollowingEnd === true) return null; } catch {}
+      const vs = getViewportState(tui);
+      return captureAnchor(vs.lines, vs.scrollTop);
+    } catch { return null; }
+  };
+
+  /**
+   * 挂布局稳定监视器；稳定后按锚点 scrollTo(target, { disableFollow: true })。
+   * disableFollow 必带：否则目标落底时会重新武装 follow-end，前功尽弃（plan §6 约束 3）。
+   */
+  const scheduleScrollRestore = (anchor: ScrollAnchor | null): void => {
+    if (!anchor) return;
+    const gen = scrollGen;
+    try {
+      const tui: any = latestTui;
+      if (!tui) return;
+      new ScrollRestoreMonitor({
+        generation: gen,
+        getGeneration: () => scrollGen,
+        getFrame: () => (tui as any).currentLayout,
+        getContentHeight: () => getViewportState(tui).contentHeight,
+        requestRender: () => (tui as any).requestRender?.(),
+        onRestore: () => {
+          try {
+            const cur: any = latestTui;
+            if (!cur || scrollGen !== gen) return;
+            const vs = getViewportState(cur);
+            const target = computeRestoreRow(vs.lines, anchor, vs.vh);
+            if (target === null || !vs.scrollView) return;
+            vs.scrollView.scrollTo(target, { disableFollow: true });
+            cur.requestRender?.();
+          } catch { /* 静默降级 */ }
+        },
+      }).start();
+    } catch { /* 静默降级 */ }
+  };
+
+  /**
+   * 扩展侧统一的工具展开变更入口：镜像记账 + 锚点保位（先捕获再变更）。
+   * applyReaderUI 的自动展开/收拢与 §9.2 阅读态手动分支都必须走这里。
+   */
+  const toggleToolsExpandedWithAnchor = (notify?: (msg: string) => void): void => {
+    const next = !(toolsExpandedMirror ?? false);
+    advanceScrollGen();
+    // 必须在高度生效前同步捕获（setExpanded 在下一次 render 才改变行数）
+    const anchor = tryCaptureAnchor();
+    try { currentCtx?.ui?.setToolsExpanded?.(next); } catch {}
+    toolsExpandedMirror = next;
+    scheduleScrollRestore(anchor);
+    if (notify) notify(`Tool output: ${next ? "expanded" : "collapsed"}`);
+  };
+
   // 统一应用 READING UI；输入栏用 ReadonlyEditor 覆盖，保留原输入内容，工具展开/收起 Promise 异步不阻塞首帧
   const applyReaderUI = (reading: boolean) => {
     let ui: any;
@@ -1076,14 +1343,26 @@ export default function (pi: ExtensionAPI) {
     }
     if (!ui) return;
     const safe = (fn: () => void) => { try { fn(); } catch { /* 忽略 */ } };
+    advanceScrollGen(); // 作废在途恢复监视器
+    const autoExpand = isAutoExpandToolsEnabled();
+    // 镜像推导：首次未知时按“刚进入且 autoExpandTools=true → true，否则 false”（plan §9.4）
+    toolsExpandedMirror = autoExpand ? reading : (toolsExpandedMirror ?? false);
+    // 捕获必须在任何高度变化之前同步完成（plan §6 约束 1）
+    const anchor = tryCaptureAnchor();
     if (reading) {
       try { savedInput = ui.getEditorText?.() ?? ""; } catch { savedInput = ""; }
       safe(() => ui.setEditorComponent?.(readonlyEditorFactory(ui)));
       safe(() => ui.setEditorText?.(""));
-      Promise.resolve().then(() => { try { ui.setToolsExpanded?.(true); } catch {} });
+      Promise.resolve().then(() => {
+        try { if (autoExpand) ui.setToolsExpanded?.(true); } catch {}
+        scheduleScrollRestore(anchor);
+      });
     } else {
       safe(() => ui.setEditorComponent?.(mainFactory));
-      Promise.resolve().then(() => { try { ui.setToolsExpanded?.(false); } catch {} });
+      Promise.resolve().then(() => {
+        try { if (autoExpand) ui.setToolsExpanded?.(false); } catch {}
+        scheduleScrollRestore(anchor);
+      });
       const toRestore = savedInput;
       savedInput = "";
       if (toRestore) safe(() => ui.setEditorText?.(toRestore));
@@ -1135,6 +1414,8 @@ export default function (pi: ExtensionAPI) {
       ed = new ScrollReaderEditor(tui, theme ?? {}, kb ?? {});
     }
     try { latestTui = tui as any; } catch {}
+    // 需求 B：terminal 通道无 kb 入参，在此记账（仿 latestTui 先例，plan §9.2）
+    try { latestKb = (kb as any) ?? undefined; } catch {}
     try {
       if (listenerInstalled) return ed;
       listenerInstalled = true;
@@ -1173,6 +1454,16 @@ export default function (pi: ExtensionAPI) {
           return { consume: true };
         }
         if (!isReading) return undefined;
+        // app.tools.expand（显式绑定键优先于固定白名单的语义导航，plan §9.2）。
+        // 前置截断键（?/esc/i/ctrl+c）已被上方分类拦截，绑上去永不可达——文档写明即可。
+        try {
+          if (latestKb?.matches?.(d, "app.tools.expand") === true) {
+            if (isDuplicateNav(d, "input")) return { consume: true };
+            toggleToolsExpandedWithAnchor((m) => flash(curTui, m));
+            curTui.requestRender?.();
+            return { consume: true };
+          }
+        } catch {}
         // 2. SEARCH_NAV：仅接受 ? 绑定的快捷键（reading 导航集），esc 已在上方处理
         // 此处 n/N 已在 tryHandleReadingNav 中白名单，其余 ? 列表外可打印字符直接消费不透传
         // 去重：仅 terminal 侧抑制
@@ -1291,6 +1582,15 @@ export default function (pi: ExtensionAPI) {
             return { consume: true };
           }
           toggle(); try { (latestTui as any)?.requestRender?.(); } catch {} return { consume: true }; }
+        // app.tools.expand（显式绑定键优先于固定白名单的语义导航，plan §9.2）
+        try {
+          if (latestKb?.matches?.(data, "app.tools.expand") === true) {
+            if (isDuplicateNav(data, "terminal")) return { consume: true };
+            toggleToolsExpandedWithAnchor((m) => flash(tt, m));
+            try { (latestTui as any)?.requestRender?.(); } catch {}
+            return { consume: true };
+          }
+        } catch {}
         if (isDuplicateNav(data, "terminal")) return { consume: true };
         if (tryHandleReadingNav(data, tt)) {
           try { (latestTui as any)?.requestRender?.(); } catch {}
@@ -1341,6 +1641,9 @@ export default function (pi: ExtensionAPI) {
     clearSearchUi();
     lastSemanticRow = null;
     savedInput = "";
+    // 新会话聊天树重建，工具展开回到核心默认（收拢）；作废在途恢复监视器
+    toolsExpandedMirror = false;
+    advanceScrollGen();
     // 配置常驻缓存，reload / 新会话时重新读取
     __resetNavConfigCacheForTest();
     try {

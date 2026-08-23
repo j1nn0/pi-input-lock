@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.0] - 2026-08-23
+
+- feat: scroll position preservation across mode toggle (prompt-ordinal anchor)
+  - Root cause: `setToolsExpanded` on toggle changes transcript height drastically; ScrollView follow-end re-arms once clamped to bottom, so exiting READING almost always snapped to the very bottom
+  - Anchor: `{k, d, count}` in the OSC133 prompt-ordinal coordinate system — expansion/collapse never adds/removes prompt boundaries so `k` is invariant; restore = `scrollTo(clamp(base + d), { disableFollow: true })` after layout stabilizes
+  - Flow: sync capture at the top of `applyReaderUI` branches → apply UI → `ScrollRestoreMonitor` polls (16ms × ≤20) until generation unchanged + `currentLayout` frame advanced + `contentHeight` stable across two frames, then restores; guards skip when following-end (natural follow takes over)
+  - Stability fix: pi-tui renders on demand (zero frames while idle) — the monitor now calls `requestRender` each tick so the two-new-frame criterion is deterministic; without it restores silently timed out
+  - Unified clamp model: exact restore when possible, clamp into segment when the anchored block collapsed away, pin to last page when content below is shorter than one viewport (anchored line always stays on screen); no fake blank padding (keeps `[q/{}/search` line coordinates clean)
+- feat: `autoExpandTools` config (`false` disables auto expand/collapse of tool output on toggle)
+  - Default `true` (previous behavior); `false` keeps tool output state untouched — position is then naturally lossless; anchor runs anyway as an idempotent no-op
+  - Config resolved from the package dir first, user-level fallback kept
+- feat: `app.tools.expand` now works inside READING mode
+  - Resolves the user keybinding via `kb.matches`/`kb.getKeys` (factory third arg); toggling goes through the same anchor wrapper so manual expand/collapse also preserves position
+  - Priority fixed: SEARCH_INPUT > toggle > exit > help > expand > semantic nav > scrolling; keys bound to pre-empted actions (`?`, esc, i, ctrl+c) stay unreachable by design
+  - `?` help dynamically lists the effective expand key(s) with edit/reading attribution
+- fix: package `config.json` was never read at runtime
+  - jiti compiles extensions into base64 `data:` URL modules where `import.meta.url` carries no file path, so module-dir resolution silently fell back to the user-level config; now uses the CJS wrapper-injected `__dirname` (probes both `<pkg>/src/..` and `<pkg>/src`) before falling back
+- test: +12 unit tests (anchor capture/restore round-trip, d clamping, followingEnd skip, count-mismatch abort, generation invalidation, monitor stability, config default fallback)
+
 ## [0.2.0] - 2026-08-21
 
 - feat: semantic navigation + anchored scrolling + search state machine

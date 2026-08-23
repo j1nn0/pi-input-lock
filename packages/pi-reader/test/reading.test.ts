@@ -14,6 +14,11 @@ import {
   findAnswerRows,
   findParagraphBounds,
   getViewportState,
+  captureAnchor,
+  computeRestoreRow,
+  ScrollRestoreMonitor,
+  isAutoExpandToolsEnabled,
+  __resetNavConfigCacheForTest,
 } from "../src/index.ts";
 
 describe("pi-reader: 视口步长", () => {
@@ -276,5 +281,187 @@ describe("pi-reader: getViewportState", () => {
     const vs = getViewportState(tui);
     expect(vs.vh).toBe(30);
     expect(vs.scrollTop).toBe(10);
+  });
+});
+
+// ---------- 滚动锚点（plan §4/§5） ----------
+
+const PROMPT = "\x1b]133;A\x07";
+
+/** 构造转录行：prefixRows 行头部，之后每段以 prompt 行开头、segments[i]-1 行正文 */
+function buildLines(segments: number[], prefixRows = 2): string[] {
+  const lines: string[] = [];
+  for (let i = 0; i < prefixRows; i++) lines.push(`head${i}`);
+  for (let s = 0; s < segments.length; s++) {
+    lines.push(`${PROMPT}q${s}`);
+    const len = segments[s] ?? 0;
+    for (let r = 1; r < len; r++) lines.push(`${s}-${r}`);
+  }
+  return lines;
+}
+
+describe("pi-reader: captureAnchor", () => {
+  // A: prompt 行号 [2, 10, 30]，总 42 行
+  const linesA = buildLines([8, 20, 12]);
+  it("记录 prompt 序号 + 段内偏移 + 总数", () => {
+    expect(captureAnchor(linesA, 12)).toEqual({ k: 1, d: 2, count: 3 });
+    expect(captureAnchor(linesA, 35)).toEqual({ k: 2, d: 5, count: 3 });
+  });
+  it("顶行位于首个 prompt 之前 → k=-1", () => {
+    expect(captureAnchor(linesA, 1)).toEqual({ k: -1, d: 1, count: 3 });
+  });
+  it("空行数组 / 无 prompt / 非法 scrollTop → null", () => {
+    expect(captureAnchor([], 0)).toBe(null);
+    expect(captureAnchor(null, 0)).toBe(null);
+    expect(captureAnchor(["a", "b"], 0)).toBe(null);
+    expect(captureAnchor(linesA, -1)).toBe(null);
+  });
+});
+
+describe("pi-reader: computeRestoreRow（统一 clamp 模型）", () => {
+  const linesA = buildLines([8, 20, 12]); // prompt [2,10,30]，42 行
+  it("往返一致：同构文档精确还原", () => {
+    const anchor = captureAnchor(linesA, 12)!;
+    expect(computeRestoreRow(linesA, anchor, 20)).toBe(12);
+  });
+  it("段收缩 → d 截断到所在段内（退到收拢块）", () => {
+    // B: prompt [2,10,15]，27 行；原 k=1,d=8 超出收缩后的段（rows 10..14）
+    const linesB = buildLines([8, 5, 12]);
+    const anchor = captureAnchor(linesA, 18)!; // k=1, d=8
+    expect(computeRestoreRow(linesB, anchor, 5)).toBe(14); // 段尾；vh=5 使 maxTop=22 不干扰
+  });
+  it("下方不够 → 贴底 clamp（目标仍在最后一屏内）", () => {
+    const linesB = buildLines([8, 5, 12]); // 27 行，vh=20 → maxTop=7
+    const anchor = captureAnchor(linesA, 35)!; // k=2, d=5 → 理想目标 20 > maxTop
+    expect(computeRestoreRow(linesB, anchor, 20)).toBe(7);
+  });
+  it("不足一屏 → 从顶渲染（maxTop=0）", () => {
+    const tiny = buildLines([3, 3, 3]); // 11 行 < vh=20
+    const anchor = captureAnchor(linesA, 31)!; // k=2, d=1
+    expect(computeRestoreRow(tiny, anchor, 20)).toBe(0);
+  });
+  it("k=-1 头部区域恢复", () => {
+    // 用足够大的文档避免“不足一屏”分支干扰：32 行，vh=20 → maxTop=12
+    const anchor = captureAnchor(linesA, 1)!; // k=-1, d=1
+    expect(computeRestoreRow(buildLines([10, 10, 10]), anchor, 20)).toBe(1);
+  });
+  it("prompt 总数变化 → O(1) 校验放弃", () => {
+    const fewer = buildLines([8, 20]); // 2 个 prompt ≠ 3
+    const anchor = captureAnchor(linesA, 12)!;
+    expect(computeRestoreRow(fewer, anchor, 20)).toBe(null);
+    expect(computeRestoreRow([], anchor, 20)).toBe(null);
+  });
+});
+
+describe("pi-reader: ScrollRestoreMonitor", () => {
+  it("帧换代 + 高度连续两个新帧相同 → 触发一次恢复", () => {
+    vi.useFakeTimers();
+    let frame: object = {};
+    let height = 100;
+    let fired = 0;
+    const m = new ScrollRestoreMonitor({
+      generation: 1,
+      getGeneration: () => 1,
+      getFrame: () => frame,
+      getContentHeight: () => height,
+      onRestore: () => { fired += 1; },
+    });
+    m.start();
+    vi.advanceTimersByTime(16); // tick1：帧未变 → 等
+    expect(fired).toBe(0);
+    frame = {}; height = 500;
+    vi.advanceTimersByTime(16); // tick2：新帧，采样 500
+    expect(fired).toBe(0);
+    vi.advanceTimersByTime(16); // tick3：帧未变 → 等
+    expect(fired).toBe(0);
+    frame = {};
+    vi.advanceTimersByTime(16); // tick4：新帧且高度仍 500 → 稳定触发
+    expect(fired).toBe(1);
+    vi.advanceTimersByTime(200);
+    expect(fired).toBe(1); // 至多一次
+    m.stop();
+    vi.useRealTimers();
+  });
+  it("generation 变化 → 立即放弃", () => {
+    vi.useFakeTimers();
+    let gen = 1;
+    let fired = 0;
+    const m = new ScrollRestoreMonitor({
+      generation: 1,
+      getGeneration: () => gen,
+      getFrame: () => ({}),
+      getContentHeight: () => 50,
+      onRestore: () => { fired += 1; },
+    });
+    m.start();
+    gen = 2;
+    for (let i = 0; i < 5; i++) {
+      gen = 2 + i;
+      vi.advanceTimersByTime(16);
+    }
+    expect(fired).toBe(0);
+    vi.useRealTimers();
+  });
+  it("高度持续变化不触发，超限后放弃", () => {
+    vi.useFakeTimers();
+    let frame: object = {};
+    let height = 0;
+    let fired = 0;
+    const m = new ScrollRestoreMonitor({
+      generation: 1,
+      getGeneration: () => 1,
+      getFrame: () => frame,
+      getContentHeight: () => height,
+      onRestore: () => { fired += 1; },
+    });
+    m.start();
+    for (let i = 0; i < 25; i++) {
+      frame = {}; // 每次换代
+      height += 10; // 高度持续不同
+      vi.advanceTimersByTime(16);
+    }
+    expect(fired).toBe(0); // 超 20 tick 上限后已停止
+    m.stop();
+    vi.useRealTimers();
+  });
+  it("stop() 中止后不再触发", () => {
+    vi.useFakeTimers();
+    let frame: object = {};
+    let fired = 0;
+    const m = new ScrollRestoreMonitor({
+      generation: 1,
+      getGeneration: () => 1,
+      getFrame: () => frame,
+      getContentHeight: () => 42,
+      onRestore: () => { fired += 1; },
+    });
+    m.start();
+    frame = {};
+    vi.advanceTimersByTime(16); // 采样 42
+    frame = {};
+    m.stop(); // 在稳定判定前中止
+    vi.advanceTimersByTime(500);
+    expect(fired).toBe(0);
+    vi.useRealTimers();
+  });
+});
+
+describe("pi-reader: isAutoExpandToolsEnabled（需求 A 默认值兑底）", () => {
+  it("VITEST 空配置下默认 true", () => {
+    __resetNavConfigCacheForTest();
+    expect(isAutoExpandToolsEnabled()).toBe(true);
+  });
+});
+
+describe("pi-reader: 需求 B 前置截断语义（parse 层可测部分）", () => {
+  it("?/esc/i/ctrl+c 被前置分类，永远不会落入 expand 槽位", () => {
+    expect(parseReadingKey("?")).toBe("help");
+    expect(parseReadingKey("\u001b")).toBe("exit");
+    expect(parseReadingKey("i")).toBe("exit");
+    expect(parseReadingKey("\x03")).toBe("exit");
+  });
+  it("ctrl+o（\\x0f，核心默认 expand 键）分类为 other，可到达 expand 分支", () => {
+    // VITEST 下默认 toggleKey 为 alt+o，ctrl+o 不是 toggle，落入 other 后由 expand 分支处理
+    expect(parseReadingKey("\x0f")).toBe("other");
   });
 });

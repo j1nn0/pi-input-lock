@@ -1,47 +1,56 @@
 # Changelog
 
-## [1.0.0] - 2026-08-22
+## [1.0.1] - 2026-08-22
 
-### BREAKING（默认行为变更，升级前必读）
-
-- **决策模型重构**：按「效果可证明性」分 R 纯读者 / W 有界写者 / X 不透明三档 + 危险叠加，取代旧 read/unknown 二档；信任域公式化 T_plan = trustedExternalPaths、T_build = cwd ∪ trustedExternalPaths
-- **build 模式未知命令不再静默放行**：含 X 段（解释器/构建工具/未识别程序）且存在跨域引用时改为 ask（FR-10）；域内仍全量放行
-- **plan 模式**：trusted 区内敏感文件写由静默 deny 改为 ask（如 `echo x > /tmp/.env`）；X 段一律 ask（strictPlanMode 时静默 deny），不再存在执行器赎免
-- **tar 由 W 改判 X**：解压目标由包内容决定不可枚举（旧实现误枚举命令行参数）；plan 下由 allow 变 ask
-- **git 未识别子命令由假只读改判 X**
-- `find -delete/-fls/-fprint*` 并入写动作检测（无独立开关，回滚需回退版本）
-
-### Added
-
-- 启动器前缀剥离（env/nice/timeout N/nohup/setsid/stdbuf/command/VAR=x）：`env rm -rf x` 正确归类为 rm（根治白名单绕过）；sudo 不剥离直接拦截
-- 会话批准记忆细粒度化：危险/X 按 program、敏感按 path、跨域写按 target 父目录（旧版 FR-4 键忽略具体命令，任一危险命令选 session 即全会话豁免所有 FR-4）
-- 弹窗 hint 每 rule 会话内只展示一次；deny 反馈按场景逐类区分文案（token -29%）并直接透传决策层自包含 reason
-- 弹窗命令展示：中段省略替代 120 字符硬截断（上限 ~400，保头尾）、复杂命令按段分行 ≤8 行、home 压缩为 ~
-- sensitivePatterns 新增 `~/.config/gh/hosts.yml`（gh CLI 凭据）；读者注册表新增 sed/jq
-
-### Changed
-
-- 决策表顺序：plan ④ 可证安全 allow 前置、⑤ X 兜底收尾（与 build 表结构对称）；yolo 分支语义不变（敏感仍 deny）
-- 工具侧 write/edit 在 plan 下信任域内 scratch 写放行（与 bash 的 tee 同权同责），跨域静默 deny
+Hardening patch after the issue #1 security review (all 6 flaws closed, see commits 00b2d50 / 57cc985).
 
 ### Fixed
 
-- git 未识别子命令不再假定只读（原「不在清单视为只读」属假只读漏洞）
-- sed 从「全参数视为写目标」修正为仅 `-i` 时写入
-- find 写 flag 省略起始路径时默认按 `.` 处理（GNU find 语义，`find -name "*.tmp" -delete` 不再漏判）；起始路径识别跳过带值选项的值（-name/-path/-newer 等）
-- `chmod/chown/chgrp --recursive` 长格式命中危险叠加（原先仅匹配含 `R` 的短选项）
-- `sort --output=` / `--output FILE` 长格式产生写目标（与 `-o` 同权）
+- `find` write flags with an omitted start path now default to `.` (GNU find semantics, `find -name "*.tmp" -delete` is no longer missed as a pure read); start-path detection skips values of value-taking options (-name/-path/-newer etc.)
+- `chmod/chown/chgrp --recursive` long form now hits the danger overlay (previously only short flags containing `R` matched)
+- `sort --output=` / `--output FILE` long forms now produce write targets (same as `-o`)
 
-### Hardened（issue #1 复审加固）
+### Hardened
 
-- 启动器剥离清单扩充：新增 `exec`/`time`/`builtin`——`exec bash -c 'x'` 命中危险叠加、`time -p ls` 正确还原为 ls、`builtin eval ls` 不再借只读外壳
-- `command`/`builtin` 的自身选项（如 `command -v`）消费后不影响真实程序识别
+- Launcher strip list extended with `exec`/`time`/`builtin` — `exec bash -c 'x'` hits the danger overlay, `time -p ls` resolves back to `ls`, `builtin eval ls` no longer borrows the read-only tier
+- Options of `command`/`builtin` (e.g. `command -v`) are consumed and no longer pollute the real program name
+- FR-10 approval keys are mode-scoped: an executor approved via `s` under build no longer leaks into the plan read-only contract
+
+## [1.0.0] - 2026-08-22
+
+### BREAKING (default behavior changes, read before upgrading)
+
+- **Decision model reworked**: commands are classified by effect provability into R pure reader / W bounded writer / X opaque tiers plus a danger overlay, replacing the old read/unknown two-tier scheme; trust domains are formalized as T_plan = trustedExternalPaths and T_build = cwd ∪ trustedExternalPaths
+- **Build no longer silently allows unknown commands**: commands with X segments (interpreters/build tools/unrecognized programs) and cross-domain references now ask (FR-10); everything inside the trust domain is still allowed
+- **Plan mode**: writes to sensitive files inside the trusted zone changed from silent deny to ask (e.g. `echo x > /tmp/.env`); X segments always ask (silent deny under strictPlanMode) — no executor exemptions remain
+- **tar reclassified from W to X**: extraction targets are determined by archive contents and cannot be enumerated (the old implementation wrongly enumerated command-line arguments); plan now asks instead of allowing
+- **Unrecognized git subcommands reclassified from pseudo-read-only to X**
+- `find -delete/-fls/-fprint*` merged into write-action detection (no separate toggle; roll back by checking out an older version)
+
+### Added
+
+- Launcher prefix stripping (env/nice/timeout N/nohup/setsid/stdbuf/command/VAR=x): `env rm -rf x` is classified as `rm` (root-cures the whitelist bypass); sudo is not stripped and is intercepted directly
+- Fine-grained session approval memory: danger/X by program, sensitive by path, cross-domain writes by target parent directory (the old FR-4 key ignored the specific command — approving one dangerous command with `s` exempted every FR-4 for the whole session)
+- Dialog hints shown once per rule per session; deny feedback is scenario-specific (token -29%) and passes through the self-contained decision reason
+- Dialog command display: middle-ellipsis replaces the 120-char hard cut (cap ~400, head+tail preserved), chained commands rendered per segment (≤8 lines), home compressed to `~`
+- `sensitivePatterns` adds `~/.config/gh/hosts.yml` (gh CLI credentials); reader registry adds sed/jq
+
+### Changed
+
+- Table order: plan ④ provable allow comes first with ⑤ X fallback last (symmetric with the build table); yolo branch semantics unchanged (sensitive still denied)
+- Tool-side write/edit allows trusted-zone scratch writes under plan (same rights as bash `tee`), silently denies cross-domain writes
+
+### Fixed
+
+- Unrecognized git subcommands no longer treated as read-only (the old "not in list = read-only" was a pseudo-read-only hole)
+- `sed` corrected from "all arguments are write targets" to writing only with `-i`
+
 
 ## [0.4.1] - 2026-08-21
 
 ### Fixed
 
-- **Deny 不再终止任务**：`src/index.ts:denyFeedback` 全部改为 `terminate:false`（含 `FR-8 plan 只读` 与 `fallback`，原 `true` 导致 `ask` 拒绝后模型收不到 `reason` 需手动再输入）。`r: deny with reason` 恒为 `false`（完全替换文本后立即回传 `LLM`，仅 `Esc` 硬终止保持 `true`）。修复 `rm -rf` 等 `FR-4` 在 `r` 输入“现在告诉我你的进展”后无响应的 bug。
+- **Deny no longer terminates the task**: `denyFeedback` in `src/index.ts` now always uses `terminate:false` (including `FR-8 plan read-only` and the fallback, which were `true` and caused the model to miss the `reason` after an ask was rejected, requiring manual re-input). `r: deny with reason` is always `false` (text is fully replaced and returned to the LLM immediately; only `Esc` hard-terminate stays `true`). Fixes the bug where `FR-4` (`rm -rf` etc.) became unresponsive after typing progress info on `r`.
 
 ## [0.4.0] - 2026-08-21
 

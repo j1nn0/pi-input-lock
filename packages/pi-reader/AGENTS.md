@@ -27,16 +27,24 @@
 
 依赖方向：`index.ts → {CustomEditor, ExtensionAPI, ExtensionContext} from pi-coding-agent` + `{Key, matchesKey, truncateToWidth, type TUI} from pi-tui`；无本地子模块。
 
-## 包特有约束（改动前必读）
+## 包特有约束（设计层面，改动前必读）
 
-- **不注册 `pi.registerShortcut`**：阅读切换走 `inputListener`/`onTerminalInput`，避免与 `app.tools.expand` 冲突报 warning
-- **切换键**：默认 `alt+o`，`config.json: {"toggleKey":"alt+o"}` 可改；仅生效配置的那个，`?` 弹窗显示生效键
-- **配置路径**：jiti 把扩展编译为 base64 data:URL，`import.meta.url` 无文件路径——`readConfigJson` 必须用 CJS 包装注入的 `__dirname` 定位包目录（本级+父级都探测），勿改回 `import.meta.url`
-- **滚动保位**：一切会调 `setToolsExpanded` 的动作必须走 `toggleToolsExpandedWithAnchor` 包装（捕获→变更→挂 `ScrollRestoreMonitor`）；监视器每 tick 必须 `requestRender`（pi-tui 按需渲染，空闲零帧，否则稳定性判据永不满足）；恢复必带 `disableFollow:true`
-- **工具展开镜像**：`toolsExpandedMirror` 由扩展发起的调用维护；编辑态核心路径切换会导致漂移（进入 READING 即重新对齐），无 getter 可读真实值
-- **expand 分支优先级**（双通道一致）：`SEARCH_INPUT 吞键 > toggle > exit > help > app.tools.expand > 语义导航 > 滚动 switch`；插入点在 `isDuplicateNav` 之后、`tryHandleReadingNav` 之前；terminal 通道的 kb 用 factory 内捕获的 `latestKb`
-- `parseReadingKey` 兼容传统控制符与 Kitty 协议
-- `gg` 用 `GgSequence(300)`（含 `gg` 同批 `gg` 合并处理）
-- 阅读态吞掉可打印/单字节；退出键 `esc`/`i`/`ctrl+c`（`i` 仅退阅读，不落入输入），`?` 仅 READING 且 `Esc` 关闭
-- `viewportHeight` 取 `getPrimaryScrollView?.().viewportHeight ?? 20`，`try/catch`；`scrollBy` 已 `clamp`
-- 状态放闭包 `isReading`/`savedInput`，不写 `appendEntry`
+**键位路由**
+- 阅读切换不注册 `pi.registerShortcut`，走双通道拦截；expand 分支优先级低于切换/退出/help、高于语义导航（显式绑定键优先于固定白名单），与 `toggleKey` 同绑的键在 READING 不可达——文档已写明勿同键
+
+**配置定位**
+- jiti 把扩展编译为 base64 data:URL 模块，`import.meta.url` 无文件路径；定位包目录必须用 CJS 包装注入的 `__dirname`
+- 若改回基于 URL 的解析不会报错，只会静默回退到用户级旧配置（字段分歧时新配置项失效，极难排查）
+
+**保位不变量**（三者缺一恢复会静默失效，无报错）
+- 一切改变 transcript 高度的动作（自动或手动的 `setToolsExpanded`）都必须过锚点包装：先同步捕获、变更后挂恢复监视器
+- 恢复 `scrollTo` 必带 `disableFollow:true`，否则目标落底会重新武装 follow-end，前功尽弃
+- 监视器的稳定性判据依赖帧代际推进，而 pi-tui 按需渲染（空闲零帧），故每 tick 必须主动 `requestRender`
+
+**锚点坐标系**
+- 选 OSC133 prompt 序号是因为它跨展开/收拢严格稳定（盒树/行号/文本签名均被否决，论证见 plan.md §3）；核心升级后若保位异常，先验证 `findPromptRows` 前提再查别处
+
+**已知限制**
+- 工具展开状态靠本地镜像维护（核心无 getter）：编辑态经核心路径切换会漂移，进入 READING 自动对齐
+- `regular` 模式无视口，滚动/保位静默降级
+- `parseReadingKey` 兼容传统控制符与 Kitty 协议；`gg` 用 `GgSequence(300)` 双击判定

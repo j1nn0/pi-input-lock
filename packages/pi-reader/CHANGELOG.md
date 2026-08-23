@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.3.1] - 2026-08-23
+
+- docs: README cleanup (en + zh-CN synced) — drop the redundant `app.tools.expand` keybinding section and the `config.json` gitignore note; remove the internal planning doc `plan.md` from the repo, no runtime changes
+
 ## [0.3.0] - 2026-08-23
 
 - feat: scroll position preservation across mode toggle (prompt-ordinal anchor)

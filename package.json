@@ -16,7 +16,7 @@
     "publish:all": "pnpm -r publish"
   },
   "devDependencies": {
-    "typescript": "^6.0.3",
+    "typescript": "catalog:",
     "@types/node": "^24.0.0"
   }
 }

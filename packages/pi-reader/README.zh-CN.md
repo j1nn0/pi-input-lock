@@ -2,14 +2,15 @@
 
 [English](./README.md) | **中文**
 
-Pi `fullscreen` 的 Vim 风格阅读模式：按 `alt+o` 进入只读并把 `transcript` 工具输出自动展开，`ctrl-u/d/f/b`、`gg/G`、`j/k` 翻页，新增 `[q/a/t` 语义跳、`{}` 段落、`/·n/N` 搜索；进出阅读与手动展开/收拢全程保持阅读位置（prompt 序号锚定），退出后恢复 `emacs` 编辑与折叠。
+Pi `fullscreen` 的 Vim 风格阅读模式：按切换键进入只读翻页，`ctrl-u/d/f/b`、`gg/G`、`j/k`，另有 `[q/a/t` 语义跳、`{}` 段落、`/·n/N` 搜索；进出阅读与手动展开/收拢全程保持阅读位置（prompt 序号锚定），退出后原样恢复 `emacs` 编辑。
 
-- **单键切换 + 自动展开**：`alt+o`（`TUI inputListener` 拦截，可在 `extensions/pi-reader/config.json` 中改 `toggleKey`）→ `READING` 并自动展开工具输出；退出恢复折叠。不想自动动工具状态？配置 `autoExpandTools: false`
+- **单键切换**：`alt+o`（`TUI inputListener` 拦截，可在 `extensions/pi-reader/config.json` 中改 `toggleKey`）→ `READING`。默认不动工具输出状态（配置 `autoExpandTools: true` 可选择进出阅读时自动展开/收拢）
 - **位置保位（锚点）**：进出阅读、手动展开/收拢时视口钉在原问答附近——锚定在 `OSC133` prompt 序号坐标系（展开/收拢不增删消息边界，序号跨切换严格稳定）；收拢后内容不足一屏时贴底展示但锚点内容仍在屏内
 - **零侵入编辑**：`INSERT` 态完全透传，`READING` 态才拦截；默认 `ctrl+u = deleteToLineStart` 零回归
 - **精准复刻 Pi 滚动**：`half = viewportHeight/2`、`page = viewportHeight-1`（`OVERLAP=1`），与 `TuiAltScreen` 一致
 - **语义导航**：`[q/]q` 问题、`[a/]a` 回答、`[t/]t` 工具、`{`/`}` 段落、`/·n/N` 搜索（`Enter` 后 `vim` 式 `n/N`）
 - **高可靠事件路由**：按键走 `TUI inputListener` 拦截，阅读态吞键、`INSERT` 透传；`ctx` 在多会话事件中刷新，确保 `resume` 旧会话可用
+- **弹窗共存**：阅读期间扩展弹窗（如权限确认）弹出时，除切换键外全部让路——弹窗可正常操作（方向键/`Enter`/`Esc`，含链式理由输入框）；切换键本身被屏蔽，防止容器重建导致弹窗 promise 悬挂。若 `?` 帮助弹窗当时开着，帮助在逻辑上也置顶：吞掉所有按键直到 `Esc` 关闭，控制权才移交弹窗
 
 ## 安装
 
@@ -49,9 +50,9 @@ pi -ne -e ./packages/pi-reader --tui-mode fullscreen
 
 - 阅读切换：`extensions/pi-reader/config.json`
   ```json
-  { "toggleKey": "alt+o", "autoExpandTools": true, "questionAnchor": "pinTop", "visibleBehavior": "keep", "wrapNavigation": false }
+  { "toggleKey": "alt+o", "autoExpandTools": false, "questionAnchor": "pinTop", "visibleBehavior": "keep", "wrapNavigation": false }
   ```
-  `autoExpandTools`：`true`（默认）进出阅读时自动展开/收拢工具输出；`false` 保持工具状态不动（此时位置天然无损）。其余同下；`questionAnchor`：`pinTop`（=1，默认）| `third`（=floor(vh/3)）| `center`（=floor(vh/2)）| 数字；`visibleBehavior`：`keep`（默认，目标已可见则不动视口仅 flash）| `reanchor`；`wrapNavigation`：首尾回绕。`?` 弹窗显示生效键
+  `autoExpandTools`：`false`（默认）进出阅读保持工具状态不动——此时位置天然无损；`true` 进出时自动展开/收拢（位置由锚点补偿）。其余同下；`questionAnchor`：`pinTop`（=1，默认）| `third`（=floor(vh/3)）| `center`（=floor(vh/2)）| 数字；`visibleBehavior`：`keep`（默认，目标已可见则不动视口仅 flash）| `reanchor`；`wrapNavigation`：首尾回绕。`?` 弹窗显示生效键
 
 ## 行为
 
@@ -59,12 +60,12 @@ pi -ne -e ./packages/pi-reader --tui-mode fullscreen
 - **锚定**：语义跳按 `row - offset`（`questionAnchor` 决定）`clamp` 到 `maxTop` 且 `disableFollow:true`；可见且 `keep` 时不动视口仅 `flash Question 2/5`
 - **指示**：`?` 在 READING 弹出英文帮助（`Esc` 关闭）：居中带边框（`╭─╮`）盒子，key/描述双列对齐
 - **count**：`1-9` 累积（`0` 仅已有 buffer 时追加），`800ms` 自动清空；`[`/`]` 500ms 为 leader 窗口；`/` 搜索完全在扩展内自研（不碰 TUI overlay），`Enter`/`n`/`N` 不与输入焦点冲突
-- **恢复**：退出清理 `gg`/count/bracket 缓冲，恢复输入与工具折叠（工具展开/收起 异步，不阻塞首帧）
+- **恢复**：退出清理 `gg`/count/bracket 缓冲，恢复输入；`autoExpandTools: true` 时同时收拢工具状态（工具展开/收起异步，不阻塞首帧）
 - **位置保位**：模式切换/手动展开前同步捕获锚点（最近 prompt 序号 + 段内偏移），高度变化落位后按统一 clamp 模型恢复（精确还原 → 段内截断 → 下方不足贴底且锚点仍在屏内）；恢复监视器每 tick 主动 `requestRender`（pi-tui 按需渲染，空闲零帧，不主动推进判据永不满足）；贴底跟随态切换时不干预，由原生 follow-end 接管
 
 ## 兼容与限制
 
-- **键协议**：兼容传统控制符与 `Kitty` 协议
+- **键协议**：兼容传统控制符与 `Kitty` 协议；方向键透传覆盖 `CSI`（`\x1b[`）与 application cursor keys 的 `SSU`（`\x1bO`）两类前缀
 - 鼠标滚轮/触板、手选复制、`ctrl+shift+f` 搜索在 fullscreen 下仍透传
 - `regular` 下无 `ScrollView`，导航静默无操作
 

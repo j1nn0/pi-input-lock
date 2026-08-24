@@ -2,14 +2,15 @@
 
 **English** | [中文](./README.zh-CN.md)
 
-Vim-style reading mode for Pi `fullscreen`: press `alt+o` to enter read-only and auto-expand `transcript` tool outputs, `ctrl-u/d/f/b`, `gg/G`, `j/k` to scroll, plus semantic jumps `[q/a/t`, paragraph `{}` and search `/`/`n`/`N`; your reading position is preserved across mode toggles and manual expand/collapse (prompt-ordinal anchoring), and exit restores `emacs` editing and collapsed tools.
+Vim-style reading mode for Pi `fullscreen`: press the toggle key to enter read-only scrolling with `ctrl-u/d/f/b`, `gg/G`, `j/k`, plus semantic jumps `[q/a/t`, paragraph `{}` and search `/`/`n`/`N`; your reading position is preserved across mode toggles and manual expand/collapse (prompt-ordinal anchoring), and exit restores `emacs` editing exactly as you left it.
 
-- **Single-key toggle + auto-expand**: `alt+o` (intercepted via `TUI inputListener`, remappable via `toggleKey` in `extensions/pi-reader/config.json`) → `READING` with auto-expanded tool outputs; collapsed state is restored on exit. Prefer the tool state untouched? Set `autoExpandTools: false`
+- **Single-key toggle**: `alt+o` (intercepted via `TUI inputListener`, remappable via `toggleKey` in `extensions/pi-reader/config.json`) → `READING`. Tool output state is left untouched by default (`autoExpandTools: true` opts into auto expand/collapse on toggle)
 - **Position anchoring**: mode toggles and manual expand/collapse pin the viewport to the Q/A you were reading — anchored in the `OSC133` prompt-ordinal coordinate system (expand/collapse never adds/removes message boundaries, so ordinals are strictly stable); when collapsed content is shorter than one viewport it pins to the last page with the anchored line still on screen
 - **Zero-intrusion editing**: fully passthrough in `INSERT`, keys intercepted only in `READING`; `ctrl+u = deleteToLineStart` by default with zero regressions
 - **Pixel-perfect Pi scrolling**: `half = viewportHeight/2`, `page = viewportHeight-1` (`OVERLAP=1`), matching `TuiAltScreen`
 - **Semantic navigation**: `[q/]q` question, `[a/]a` answer, `[t/]t` tool, `{`/`}` paragraph, `/` search with `n`/`N` (vim-style after `Enter`)
 - **Robust event routing**: keys go through `TUI inputListener` — reading mode swallows keys, `INSERT` passes through; `ctx` is refreshed across multi-session events so `resume` on old sessions works
+- **Dialog coexistence**: when an extension dialog (e.g. a permission ask) pops up while reading, the reader yields every key except its toggle key — dialogs stay fully operable (`arrows`/`Enter`/`Esc`, chained reason inputs included); the toggle key itself is blocked to prevent the container rebuild that would hang the dialog's promise. If the `?` help overlay was open under the dialog, help stays logically topmost: it swallows all keys until `Esc` closes it, then control hands over to the dialog
 
 ## Installation
 
@@ -49,9 +50,9 @@ pi -ne -e ./packages/pi-reader --tui-mode fullscreen
 
 - Reading toggle: `extensions/pi-reader/config.json`
   ```json
-  { "toggleKey": "alt+o", "autoExpandTools": true, "questionAnchor": "pinTop", "visibleBehavior": "keep", "wrapNavigation": false }
+  { "toggleKey": "alt+o", "autoExpandTools": false, "questionAnchor": "pinTop", "visibleBehavior": "keep", "wrapNavigation": false }
   ```
-  `autoExpandTools`: `true` (default) auto expands/collapses tool output on toggle; `false` keeps tool state untouched (position is then naturally lossless). Others: `questionAnchor`: `pinTop` (=1, default) | `third` (=floor(vh/3)) | `center` (=floor(vh/2)) | `number`; `visibleBehavior`: `keep` (default, keep viewport if target already visible, flash only) | `reanchor`; `wrapNavigation`: wrap at ends. `?` popup shows the effective toggle key.
+  `autoExpandTools`: `false` (default) keeps tool output state untouched across toggles — position is then naturally lossless; `true` opts into auto expand/collapse on toggle (position compensated via the anchor). Others: `questionAnchor`: `pinTop` (=1, default) | `third` (=floor(vh/3)) | `center` (=floor(vh/2)) | `number`; `visibleBehavior`: `keep` (default, keep viewport if target already visible, flash only) | `reanchor`; `wrapNavigation`: wrap at ends. `?` popup shows the effective toggle key.
 
 ## Behavior
 
@@ -59,12 +60,12 @@ pi -ne -e ./packages/pi-reader --tui-mode fullscreen
 - **Anchoring**: semantic jumps compute `row - offset` (offset by `questionAnchor`) clamped to `maxTop` with `disableFollow:true`; visible targets with `keep` stay in place and flash `Question 2/5` instead of scrolling
 - **Indicator**: `?` in READING shows the English help overlay (`Esc` to close) — a centered bordered box (`╭─╮`) with aligned key/description columns
 - **Count**: digits `1-9` accumulate (`0` only after existing buffer), cleared after `800ms` or after jump/scroll; `[`/`]` (`500ms`) is leader sequence; `/` search runs fully inside the extension (no TUI overlay) so `Enter`/`n`/`N` never fight the input focus
-- **Restore**: clears the `gg`/count/bracket buffers on exit, restores input and tool collapse state (tool expand/collapse is async and does not block the first frame)
+- **Restore**: clears the `gg`/count/bracket buffers on exit, restores input and (when `autoExpandTools: true`) tool collapse state (tool expand/collapse is async and does not block the first frame)
 - **Position anchoring**: captures an anchor (nearest prompt ordinal + in-segment offset) synchronously before any height change, then restores via the unified clamp model once layout settles (exact restore → in-segment truncation → pin to last page when content below is shorter than a viewport, anchored line still on screen); the restore monitor calls `requestRender` every tick (pi-tui renders on demand — zero frames while idle, so the stability criterion would never fire otherwise); toggling while following-end is left to native follow-end semantics
 
 ## Compatibility & Limitations
 
-- **Key protocol**: compatible with legacy control sequences and `Kitty` keyboard protocol
+- **Key protocol**: compatible with legacy control sequences and `Kitty` keyboard protocol; arrow-key passthrough covers both `CSI` (`\x1b[`) and application-cursor-keys `SSU` (`\x1bO`) sequences
 - Mouse wheel / trackpad, text selection + copy, and `ctrl+shift+f` search still pass through in fullscreen
 - `regular` mode has no `ScrollView` — navigation silently no-ops
 

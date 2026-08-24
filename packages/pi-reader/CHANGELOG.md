@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.2] - 2026-08-24
+
+- fix: extension dialogs (e.g. a permission ask via `ctx.ui.select`) were frozen while READING was active, and toggling reading mode away made the dialog vanish without resolving its promise — the pending tool call hung forever (agent stuck on "Working...")
+  - Root cause A: both TUI-level input listeners consumed Enter/j/k/etc. before the focused extension selector component could receive them; arrow keys in application cursor keys mode (`\x1bO…` SSU sequences) were swallowed too (the passthrough whitelist only covered `\x1b[`)
+  - Root cause B: exiting READING rebuilds the editor container (`setCustomEditorComponent` clears it unconditionally), dropping the dialog component without resolving its promise (upstream issue, reported separately; this release avoids triggering it)
+  - Fix: focus-based dialog detection — per-key live comparison of `tui.focusedComponent !== reader editor`, exempting the reader's own help overlay and search input components (no reliance on overlay preFocus-restore timing; chained dialogs select→input are handled since detection is not a snapshot)
+  - While a foreign component holds focus, the only intercepted key is the reading-toggle key (prevents the container-rebuild hang); every other key is passed through untouched — Enter/j/k/arrows/Esc all operate the dialog as expected
+  - `\x1bO` SSU sequences added to the passthrough whitelist of both channels
+  - change: `autoExpandTools` now defaults to `false` — tool output state is left untouched across toggles (position naturally lossless); opt in with `autoExpandTools: true`
+  - Help overlay + dialog coexistence: the help overlay visually covers the dialog but lost focus to it, so while both are open the reader treats help as logically topmost — it swallows every key except Esc (matching its normal esc-only behavior; nothing leaks to the invisible dialog), and Esc closes the help (overlay hide only restores focus when it holds it, so the dialog keeps focus). Keys start reaching the dialog only after the help is closed
+  - Testability seam: dual-channel key routing extracted into injectable factory `createReadingKeyRouter(io, source)` (+25 unit tests incl. dialog-open passthrough/blocking matrix and direct tests of the `isForeignFocus` detection core); dead `patchSearchTitle` helper removed
+  - `/reader` command no longer announces a mode flip that was suppressed by the dialog guard
+  - docs: README (en/zh) rewritten for the new defaults and dialog-coexistence behavior; package AGENTS.md now records the layering/focus-stack design constraints
+
 ## [0.3.1] - 2026-08-23
 
 - docs: README cleanup (en + zh-CN synced) — drop the redundant `app.tools.expand` keybinding section and the `config.json` gitignore note; remove the internal planning doc `plan.md` from the repo, no runtime changes

@@ -178,11 +178,14 @@ describe("audit 审查日志（FR-6）", () => {
     const home = os.homedir();
     const unique = `pi-permission-test-tilde-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const logDir = `~/${unique}`;
-    const auditor = createAuditor({ base, logDir, project: "/proj/myapp", reviewEnabled: true, debugEnabled: false });
-    auditor.review({ mode: "build", toolName: "bash", rule: "FR-1", action: "ask", reason: "x" });
-    const file = path.join(home, unique, "myapp", "pi-permission-review.jsonl");
-    expect(fs.existsSync(file)).toBe(true);
-    // 清理
-    fs.rmSync(path.join(home, unique), { recursive: true, force: true });
+    // 写入真实 home，断言失败也不能残留，清理放进 finally
+    try {
+      const auditor = createAuditor({ base, logDir, project: "/proj/myapp", reviewEnabled: true, debugEnabled: false });
+      auditor.review({ mode: "build", toolName: "bash", rule: "FR-1", action: "ask", reason: "x" });
+      const file = path.join(home, unique, "myapp", "pi-permission-review.jsonl");
+      expect(fs.existsSync(file)).toBe(true);
+    } finally {
+      fs.rmSync(path.join(home, unique), { recursive: true, force: true });
+    }
   });
 });

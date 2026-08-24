@@ -136,8 +136,8 @@ describe("父目录软链逃逸（issue #1 缺陷 6 回归）", () => {
   it("realpathDeep 解析不存在文件的软链父目录", () => {
     const home = os.homedir();
     const root = fs.mkdtempSync(path.join(home, "pi-permission-symlink-"));
+    const outside = fs.mkdtempSync(path.join(home, "pi-permission-outside-"));
     try {
-      const outside = fs.mkdtempSync(path.join(home, "pi-permission-outside-"));
       const link = path.join(root, "link");
       fs.symlinkSync(outside, link);
       // 目标文件尚不存在：link/newfile 深解析应落在 outside 下
@@ -146,7 +146,9 @@ describe("父目录软链逃逸（issue #1 缺陷 6 回归）", () => {
       // isWithinCwd 应判定为域外（旧实现回退未解析路径误判为域内）
       expect(isWithinCwd(path.join(link, "newfile"), root, home)).toBe(false);
     } finally {
+      // root 与 outside 都在真实 home 下，必须一并清理
       fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
     }
   });
 });

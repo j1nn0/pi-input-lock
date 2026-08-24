@@ -9,6 +9,9 @@
  *   - esc/i/c 退出 READING   ? 帮助弹窗（英文，Esc 关闭）
  *   - 输入栏 READING 时左显 ◉ Reading 覆盖，原输入保留
  *   - count 前缀 1-9 累积（0 仅已有 buffer 时追加，800ms 清空），5j / 3]q 生效
+ * 弹窗让路（plan-dialog-interaction-fix）：外部组件夺焦（扩展弹窗/ui.input 等）期间，
+ *   唯一拦截的是 toggle 键（放行会致容器重建 + promise 悬挂），其余全量透传；
+ *   探测为每键实时焦点比对 focusedComponent ≠ reader 编辑器（豁免自有帮助/搜索组件）
  * 搜索状态机（满足四目标）：
  *   READING --"/"--> SEARCH_INPUT --enter--> SEARCH_NAV --esc--> READING
  *   READING --"/"--> SEARCH_INPUT --esc--> READING (取消高亮)
@@ -103,6 +106,261 @@ export function isEscKey(d: string): boolean {
   // \x1b 单字节 esc 已在 parseReadingKey 中单独处理，isEscKey 需严格避免 alt+o 误判
   if (d === "\x1b") return true;
   return false;
+}
+
+// ---------- 按键路由（双渠道共用核心，依赖注入可单测；见 plan-dialog-interaction-fix §4.1.2） ----------
+
+/** 判断 TUI 是否处于原生搜索态（activeSearch 存在即视为有搜索栏） */
+export function hasActiveSearch(tui: any): boolean {
+  try { return !!(tui as any)?.activeSearch; } catch { return false; }
+}
+
+/** reader 自有组件引用集合（焦点豁免用） */
+export interface OwnFocusRefs {
+  /** reader 自己创建的最新编辑器实例（ScrollReaderEditor / ReadonlyEditor） */
+  editor?: unknown;
+  /** 帮助 overlay 组件引用 */
+  help?: unknown;
+  /** 原生搜索输入组件（activeSearch.component） */
+  searchComponent?: unknown;
+}
+
+/**
+ * 弹窗夺焦判定本体（纯函数，可单测）：焦点被非 reader 组件持有时为真。
+ * 三重豁免：reader 编辑器、自有帮助 overlay、原生搜索输入组件——
+ * 不依赖「overlay.hide 同步还原 preFocus」的隐式时序。
+ */
+export function isForeignFocus(focus: unknown, own: OwnFocusRefs): boolean {
+  if (!focus) return false;
+  if (focus === own.editor) return false;
+  if (focus === own.help) return false;
+  if (focus === own.searchComponent) return false;
+  return true;
+}
+
+/** inputListener / onTerminalInput 的返回结果 */
+export type RouteResult = { consume: true } | undefined;
+
+/** 双渠道共用按键路由的依赖注入接口：listener 只做薄接线，路由逻辑独立单测 */
+export interface ReadingRouterIO {
+  /** 是否处于 READING */
+  isReading(): boolean;
+  /** 搜索状态机当前值 */
+  searchMode(): SearchMode;
+  /** 帮助弹窗是否打开 */
+  helpOpen(): boolean;
+  /** 外部组件夺焦探测（扩展弹窗/ui.input 等一切夺焦场景）；为真时除渠道 1 的 toggle 外全量透传 */
+  dialogOpen(): boolean;
+  /** 当前 TUI 引用 */
+  getTui(): any;
+  /** 双通道去重（terminal 对极短时间内重复投递抑制） */
+  isDuplicateNav(data: string, source: "input" | "terminal"): boolean;
+  /** 搜索输入处理（INPUT 态全量接收直到 enter/esc）；返回 undefined 表示未消费 */
+  handleSearchInput(data: string, tui: any, source: "input" | "terminal"): boolean | undefined;
+  /** esc 二义处理：有搜索栏就关搜索取消高亮，否则退出阅读 */
+  handleEsc(tui: any): void;
+  /** 清搜索栏并取消高亮，重置状态机，留在 READING */
+  closeSearch(tui: any): void;
+  /** 切换阅读模式 */
+  toggle(): void;
+  /** 打开帮助弹窗 */
+  showHelp(): void;
+  /** 关闭帮助 overlay（done→hideOverlay；弹窗持焦时不抢焦点） */
+  closeHelp(): void;
+  /** app.tools.expand 键位匹配 */
+  matchesExpand(data: string): boolean;
+  /** 工具展开切换（app.tools.expand 命中时调用，含锚点保位） */
+  toggleToolsExpanded(): void;
+  /** 语义导航（/ n N {} 与 [q/a/t 序列）；返回 true 表示已消费 */
+  trySemanticNav(data: string, tui: any): boolean;
+  /** 视口高度读取（异常时兜底 20） */
+  getViewportHeight(tui: any): number;
+  /** gg 双击判定 */
+  ggPress(): boolean;
+  ggReset(): void;
+  countPeek(): number | undefined;
+  countReset(): void;
+  /** 重置 count buffer 与 [ ] 序列缓冲（透传前清残留修饰状态） */
+  resetModifiers(): void;
+  /** 记录上次语义跳目标 */
+  updateLastSemantic(row: number): void;
+  requestRender(tui: any): void;
+}
+
+/**
+ * 创建双渠道共用的按键路由（TUI inputListener = "input"，onTerminalInput = "terminal"）。
+ *
+ * 分层语义（plan §5）：
+ * - 外部弹窗夺焦期间：唯一拦截的是 toggle——它是唯一直接操作「层」本身的按键，
+ *   放行会导致编辑器容器重建、弹窗 promise 永久悬挂（Bug B）；其余按键全部透传；
+ * - 渠道 2 的 toggle/help 让渡渠道 1 统一处理，避免双通道重复；
+ * - READING 内优先级：SEARCH_INPUT > toggle > help > exit > expand > 语义导航 > 滚动。
+ */
+export function createReadingKeyRouter(io: ReadingRouterIO, source: "input" | "terminal"): (data: string) => RouteResult {
+  return (data: string): RouteResult => {
+    const tui = io.getTui();
+    const reading = io.isReading();
+
+    // ─── 外部弹窗/帮助并存期的按键接管（设计约束，勿改语义）─────
+    //
+    // 分发模型：pi-tui 先逐个执行 TUI 级 inputListeners（本函数即其中之一），
+    // 任一 consume 则终止分发；全部放行才轮到 focusedComponent.handleInput。
+    // 即本函数位于焦点组件（弹窗）的「上游必经之路」，consume = 键永远消失，
+    // 放行 = 继续流向下游焦点窗体。核心在弹窗出现时 setFocus(弹窗)，
+    // 帮助 overlay 只是视觉残留在上层、已失焦——「逻辑栈顶」由本路由的判定模拟。
+    //
+    // 三态决策表：
+    //   ① help 开 && 焦点被外部夺走：UI 最上层是帮助 → 逻辑上也置顶——
+    //      esc 关帮助（closeHelp 走 overlay hide，仅在自持焦点时才恢复焦点，
+    //      故不抢弹窗焦点），其余键一律承接吞掉（与帮助常态「只认 esc」一致，
+    //      不下漏到看不见的弹窗，防误 terminate）；关闭后落入态②
+    //   ② 仅外部弹窗夺焦：只吞 toggle——它是唯一直接操作「层」本身的键，
+    //      放行会触发核心 setCustomEditorComponent 无条件 editorContainer.clear()，
+    //      弹窗 promise 永久悬挂（Bug B）；其余全量放行给弹窗正常操作（Bug A 修复）
+    //   ③ 都不是：落到下方常规阅读路由
+    // 探测为每键实时焦点比对（非快照），链式弹窗 select→input 换组件也能感知。
+    if (io.dialogOpen()) {
+      if (source === "terminal") {
+        if (io.helpOpen()) {
+          if (isEscKey(data) || data === "\x1b") {
+            io.closeHelp();
+            io.requestRender(tui);
+          }
+          // esc 关帮助；其余键一律承接不透传（UI 与逻辑统一在帮助层）
+          return { consume: true };
+        }
+        if (parseReadingKey(data) === "toggle") {
+          return { consume: true };
+        }
+      }
+      return undefined;
+    }
+
+    // 帮助 overlay 打开（无外部弹窗）：两渠道均早退（焦点在 overlay 上，自收输入）
+    if (io.helpOpen()) return undefined;
+
+    const key = parseReadingKey(data);
+
+    // 渠道 1：toggle 切换阅读模式（置于 SEARCH_INPUT 之前，维持原优先级）
+    if (source === "terminal" && key === "toggle") {
+      io.toggle();
+      io.requestRender(tui);
+      return { consume: true };
+    }
+
+    // SEARCH_INPUT：接收所有输入直到 enter（优先级最高，?/i/toggle 等亦作文本）
+    if (reading && io.searchMode() === SearchMode.INPUT) {
+      const r = io.handleSearchInput(data, tui, source);
+      if (r !== undefined) {
+        io.requestRender(tui);
+        return { consume: true };
+      }
+      return undefined;
+    }
+
+    // 渠道 2：toggle/help 仍由渠道 1 统一处理，避免双通道重复
+    if (source === "input" && (key === "toggle" || key === "help")) return undefined;
+
+    // 渠道 1：非阅读态只关心上方已处理的 toggle
+    if (source === "terminal" && !reading) return undefined;
+
+    // 渠道 1：? 打开帮助
+    if (key === "help") {
+      io.showHelp();
+      io.requestRender(tui);
+      return { consume: true };
+    }
+
+    // exit (esc/i/ctrl+c)：esc 二义由 handleEsc 统一——有搜索先关搜索，否则退阅读
+    if (key === "exit") {
+      if (!reading) return undefined;
+      if (isEscKey(data) || data === "\x1b") {
+        io.handleEsc(tui);
+        io.requestRender(tui);
+        return { consume: true };
+      }
+      // i / ctrl+c：有搜索时先清搜索（留在 READING），无搜索才退出
+      if (io.searchMode() !== SearchMode.INACTIVE || hasActiveSearch(tui)) {
+        io.closeSearch(tui);
+        io.requestRender(tui);
+        return { consume: true };
+      }
+      io.toggle();
+      io.requestRender(tui);
+      return { consume: true };
+    }
+
+    if (!reading) return undefined;
+
+    // app.tools.expand（显式绑定键优先于固定白名单的语义导航，plan §9.2）
+    try {
+      if (io.matchesExpand(data)) {
+        if (io.isDuplicateNav(data, source)) return { consume: true };
+        io.toggleToolsExpanded();
+        io.requestRender(tui);
+        return { consume: true };
+      }
+    } catch { /* 键位表不可用则忽略 */ }
+
+    // 双通道去重：同一按键极短时间内重复到达只处理一次
+    if (io.isDuplicateNav(data, source)) return { consume: true };
+
+    // 语义导航：/ n N {} 与 [q/a/t 序列
+    if (io.trySemanticNav(data, tui)) {
+      io.requestRender(tui);
+      return { consume: true };
+    }
+
+    // 滚动导航
+    const vh = Math.max(1, io.getViewportHeight(tui));
+    const half = halfPage(vh);
+    const page = pageStep(vh);
+    const lineCnt = io.countPeek() ?? 1;
+    switch (key) {
+      case "halfUp": tui?.scrollBy?.(-half * lineCnt); io.countReset(); break;
+      case "halfDown": tui?.scrollBy?.(half * lineCnt); io.countReset(); break;
+      case "pageDown": tui?.scrollBy?.(page * lineCnt); io.countReset(); break;
+      case "pageUp": tui?.scrollBy?.(-page * lineCnt); io.countReset(); break;
+      case "lineUp": tui?.scrollBy?.(-lineCnt); io.countReset(); break;
+      case "lineDown": tui?.scrollBy?.(lineCnt); io.countReset(); break;
+      case "bottom": tui?.scrollToBottom?.(); io.countReset(); break;
+      case "top":
+        if (data === "gg") {
+          io.ggReset();
+          tui?.scrollToTop?.();
+          io.countReset();
+          io.updateLastSemantic(0);
+        } else if (io.ggPress()) {
+          tui?.scrollToTop?.();
+          io.countReset();
+          io.updateLastSemantic(0);
+        } else {
+          // 首 g：等待窗口内第二次 g
+          return { consume: true };
+        }
+        break;
+      case "other":
+        if (source === "terminal") {
+          // 多字节 CSI/SSU 序列（含 application cursor keys \x1bO…，§3.3）透传给焦点组件。
+          // 注：此处不清理修饰缓冲（与 input 渠道不对称）——同一按键随后必达 input 渠道，
+          // 由其 CSI/SSU 透传分支统一 countReset+resetModifiers，净效果一致
+          if (data.length > 1 && (data.startsWith("\x1b[") || data.startsWith("\x1bO"))) return undefined;
+        } else {
+          // 单字节（含数字与不可打印控制符）一律消费，避免泄漏进核心编辑器
+          if (isPrintable(data) || data.length === 1) return { consume: true };
+          // 多字节非 CSI/SSU 序列消费；CSI/SSU 透传
+          if (!(data.startsWith("\x1b[") || data.startsWith("\x1bO"))) return { consume: true };
+          io.countReset();
+          io.resetModifiers();
+          return undefined;
+        }
+        break;
+      default:
+        return undefined;
+    }
+    io.requestRender(tui);
+    return { consume: true };
+  };
 }
 
 // ---------- 行扫描（可单测） ----------
@@ -541,11 +799,12 @@ export function getNavConfigCached(): NavConfig {
 
 /**
  * 需求 A：模式切换时是否自动展开/收拢工具输出（plan §9.1）。
- * 默认值在消费侧兜底为 true——VITEST 分支返回空配置时同样生效，防测试基线漂移。
+ * 默认 false：保持工具状态不动，进出阅读位置天然无损；true 为显式选择，
+ * 展开动作走锚点包装补偿位置。VITEST 空配置同样走此兑底，防测试基线漂移。
  */
 export function isAutoExpandToolsEnabled(): boolean {
   const v = getNavConfigCached().autoExpandTools;
-  return v === undefined ? true : v;
+  return v === undefined ? false : v;
 }
 
 export function __resetNavConfigCacheForTest(): void {
@@ -778,6 +1037,11 @@ export default function (pi: ExtensionAPI) {
   let offTerminalInput: (() => void) | undefined;
   // inputListener 只安装一次：mainFactory 退出阅读恢复时会再次被调用，防止重复拦截。
   let listenerInstalled = false;
+  // reader 自己创建的最新编辑器实例（两个工厂都要登记）；不能用 instanceof——
+  // jiti 模块边界下会失效，核心自己也用 duck typing
+  let currentReaderEditor: object | undefined;
+  // reader 自有的帮助 overlay 组件引用（dialogOpen 豁免用）
+  let currentHelpComponent: object | undefined;
   const gg = new GgSequence(300); // gg 300ms 双击（100ms 过短易失效）
   const countBuf = new CountBuffer(800);
   const bracketSeq = new BracketSequence(500);
@@ -818,30 +1082,26 @@ export default function (pi: ExtensionAPI) {
     return false;
   };
 
-  const hasActiveSearch = (tui: any): boolean => {
-    try { return !!(tui as any)?.activeSearch; } catch { return false; }
-  };
-
-  const patchSearchTitle = (tui: any): void => {
-    try {
-      const comp: any = (tui as any)?.activeSearch?.component;
-      if (comp && typeof comp.render === "function" && !(comp as any).__patchedSearchLabel) {
-        const orig = comp.render.bind(comp);
-        (comp as any).__patchedSearchLabel = true;
-        comp.render = (width: number) => {
-          const lines: string[] = orig(width);
-          if (lines[0]?.includes("Find transcript")) lines[0] = lines[0].replace("Find transcript", "Search");
-          else if (lines[0]?.includes("Find")) lines[0] = lines[0].replace(/Find[^\x1b]*/, "Search");
-          return lines;
-        };
-        try { (tui as any)?.requestRender?.(); } catch {}
-      }
-    } catch {}
-  };
-
   const flash = (tui: any, msg: string): void => {
     try { (tui as any)?.flash?.(msg); return; } catch {}
     try { currentCtx?.ui?.notify?.(msg, "info"); } catch {}
+  };
+
+  /**
+   * 焦点被非 reader 组件持有时为真（扩展弹窗/ui.input/ui.custom 等一切夺焦场景），
+   * 此时 reader 必须让路。探测为每键实时焦点比对（非快照）：链式弹窗
+   * （select → input 换组件）也能正确感知。豁免 reader 自有的编辑器、帮助组件
+   * 与搜索输入组件，不依赖「overlay.hide 同步还原 preFocus」的隐式时序。
+   */
+  const dialogOpen = (): boolean => {
+    try {
+      const tui: any = latestTui;
+      return isForeignFocus(tui?.focusedComponent, {
+        editor: currentReaderEditor,
+        help: currentHelpComponent,
+        searchComponent: tui?.activeSearch?.component,
+      });
+    } catch { return false; }
   };
 
   // 搜索进度显示在底部输入栏（ReadonlyEditor）固定位置替换，不用 flash。
@@ -1212,14 +1472,17 @@ export default function (pi: ExtensionAPI) {
   };
 
   let helpOpen = false;
+  // 帮助 overlay 的关闭入口（done 回调包装）：供 esc 路径与弹窗期守卫共用
+  let helpClose: (() => void) | undefined;
   const showHelp = () => {
     if (helpOpen) return;
     let ui: any;
     try { ui = currentCtx?.ui; } catch { return; }
     if (!ui?.custom) return;
     helpOpen = true;
+    currentHelpComponent = undefined;
     ui.custom((tui: any, _theme: any, _kb: any, done: (v: any) => void) => {
-      return {
+      const comp = {
         render: (width: number) => {
           const entries = getHelpEntries();
           const padL = 2;
@@ -1256,15 +1519,30 @@ export default function (pi: ExtensionAPI) {
           return out;
         },
         handleInput: (data: string) => {
-          if (matchesKey(data, "escape")) {
-            helpOpen = false;
-            done(undefined);
-          }
+          if (matchesKey(data, "escape")) helpClose?.();
         },
         invalidate: () => {},
         focused: true,
       } as any;
-    }, { overlay: true, overlayOptions: { anchor: "center" as any } } as any)?.then(() => { helpOpen = false; }).catch(() => { helpOpen = false; });
+      // 登记 reader 自有 overlay 组件引用与关闭入口（dialogOpen 焦点比对豁免 / 弹窗期 esc 先关帮助）
+      currentHelpComponent = comp;
+      helpClose = () => {
+        if (!helpOpen) return;
+        helpOpen = false;
+        currentHelpComponent = undefined;
+        helpClose = undefined;
+        done(undefined);
+      };
+      return comp;
+    }, { overlay: true, overlayOptions: { anchor: "center" as any } } as any)?.then(() => {
+      helpOpen = false;
+      currentHelpComponent = undefined;
+      helpClose = undefined;
+    }).catch(() => {
+      helpOpen = false;
+      currentHelpComponent = undefined;
+      helpClose = undefined;
+    });
   };
 
   // 滚动恢复代际号递增：作废在途监视器，返回新号
@@ -1370,11 +1648,14 @@ export default function (pi: ExtensionAPI) {
   };
 
   // toggle：只翻转状态 + 尽力应用 UI
-  const toggle = (ctx?: ExtensionContext) => {
+  /** @returns 是否实际翻转（外部弹窗持有焦点时被守卫拦截则返回 false） */
+  const toggle = (ctx?: ExtensionContext): boolean => {
     if (ctx) {
       currentCtx = ctx;
       ctxBroken = false;
     }
+    // 纵深防御：外部弹窗持有焦点时禁止切换——容器重建会让弹窗 promise 悬挂（Bug B）
+    if (dialogOpen()) return false;
     if (isReading) {
       gg.reset();
       countBuf.reset();
@@ -1391,6 +1672,7 @@ export default function (pi: ExtensionAPI) {
     }
     isReading = !isReading;
     applyReaderUI(isReading);
+    return true;
   };
 
   /** esc 统一处理：有搜索栏就关闭取消高亮，留在 READING；无搜索才退出 READING */
@@ -1404,6 +1686,44 @@ export default function (pi: ExtensionAPI) {
     return true;
   };
 
+  // ---------- 可测性接缝：双渠道共用路由的薄接线（单测见 test/router.test.ts） ----------
+  const routerIO: ReadingRouterIO = {
+    isReading: () => isReading,
+    searchMode: () => searchMode,
+    helpOpen: () => helpOpen,
+    dialogOpen,
+    getTui: () => latestTui ?? (currentCtx as any)?.ui?.tui ?? (currentCtx as any)?.tui,
+    isDuplicateNav,
+    handleSearchInput: (d, tui, src) => handleSearchInput(d, tui, src),
+    handleEsc: (tui) => { handleEsc(tui); },
+    closeSearch: (tui) => { closeSearchAndReset(tui); },
+    toggle: () => toggle(),
+    showHelp,
+    closeHelp: () => { try { helpClose?.(); } catch {} },
+    matchesExpand: (d) => {
+      try { return latestKb?.matches?.(d, "app.tools.expand") === true; } catch { return false; }
+    },
+    toggleToolsExpanded: () => {
+      const tt: any = latestTui ?? (currentCtx as any)?.ui?.tui ?? (currentCtx as any)?.tui;
+      toggleToolsExpandedWithAnchor((m) => flash(tt, m));
+    },
+    trySemanticNav: (d, tui) => tryHandleReadingNav(d, tui),
+    getViewportHeight: (tui) => {
+      try {
+        return tui?.getPrimaryScrollView?.().viewportHeight ?? (latestTui as any)?.getPrimaryScrollView?.().viewportHeight ?? 20;
+      } catch { return 20; }
+    },
+    ggPress: () => gg.press(),
+    ggReset: () => gg.reset(),
+    countPeek: () => countBuf.peek(),
+    countReset: () => countBuf.reset(),
+    resetModifiers: () => { countBuf.reset(); bracketSeq.reset(); },
+    updateLastSemantic,
+    requestRender: (tui) => { try { tui?.requestRender?.(); } catch {} },
+  };
+  const inputRoute = createReadingKeyRouter(routerIO, "input");
+  const terminalRoute = createReadingKeyRouter(routerIO, "terminal");
+
   // TUI inputListener 高可靠拦截（不依赖 editor focus）
   const factory = (tui: TUI, theme: any, kb: any) => {
     const tt: any = tui;
@@ -1414,120 +1734,26 @@ export default function (pi: ExtensionAPI) {
       ed = new ScrollReaderEditor(tui, theme ?? {}, kb ?? {});
     }
     try { latestTui = tui as any; } catch {}
+    // dialogOpen 焦点比对基准：登记 reader 自己创建的最新编辑器实例
+    currentReaderEditor = ed;
     // 需求 B：terminal 通道无 kb 入参，在此记账（仿 latestTui 先例，plan §9.2）
     try { latestKb = (kb as any) ?? undefined; } catch {}
     try {
       if (listenerInstalled) return ed;
       listenerInstalled = true;
-      tt.addInputListener?.((d: string) => {
-        if (helpOpen) return undefined;
-        const curTui: any = (latestTui as any) ?? tt;
-        // 1. SEARCH_INPUT：接收所有输入直到 enter（优先级最高，?/alt+o/i 等亦作文本）
-        if (isReading && searchMode === SearchMode.INPUT) {
-          const r = handleSearchInput(d, curTui, "input");
-          if (r !== undefined) {
-            curTui.requestRender?.();
-            return { consume: true };
-          }
-          return undefined;
-        }
-        const key = parseReadingKey(d);
-        // toggle/help 仍由 onTerminalInput 统一处理，避免双通道重复
-        if (key === "toggle" || key === "help") return undefined;
-        // exit (esc/i/ctrl+c)：esc 二义由 handleEsc 统一，有搜索就关搜索否则退阅读
-        if (key === "exit") {
-          if (!isReading) return undefined;
-          // esc 二义：有搜索就关搜索，否则退阅读
-          if (isEscKey(d) || d === "\x1b") {
-            handleEsc(curTui);
-            curTui.requestRender?.();
-            return { consume: true };
-          }
-          // i / ctrl+c：有搜索时先清搜索（留在 READING），无搜索才退出
-          if (searchMode !== SearchMode.INACTIVE || hasActiveSearch(curTui)) {
-            closeSearchAndReset(curTui);
-            curTui.requestRender?.();
-            return { consume: true };
-          }
-          toggle();
-          curTui.requestRender?.();
-          return { consume: true };
-        }
-        if (!isReading) return undefined;
-        // app.tools.expand（显式绑定键优先于固定白名单的语义导航，plan §9.2）。
-        // 前置截断键（?/esc/i/ctrl+c）已被上方分类拦截，绑上去永不可达——文档写明即可。
-        try {
-          if (latestKb?.matches?.(d, "app.tools.expand") === true) {
-            if (isDuplicateNav(d, "input")) return { consume: true };
-            toggleToolsExpandedWithAnchor((m) => flash(curTui, m));
-            curTui.requestRender?.();
-            return { consume: true };
-          }
-        } catch {}
-        // 2. SEARCH_NAV：仅接受 ? 绑定的快捷键（reading 导航集），esc 已在上方处理
-        // 此处 n/N 已在 tryHandleReadingNav 中白名单，其余 ? 列表外可打印字符直接消费不透传
-        // 去重：仅 terminal 侧抑制
-        if (isDuplicateNav(d, "input")) return { consume: true };
-        if (tryHandleReadingNav(d, curTui)) {
-          curTui.requestRender?.();
-          return { consume: true };
-        }
-
-        let vh = 20;
-        try { vh = curTui.getPrimaryScrollView?.().viewportHeight ?? tt.getPrimaryScrollView?.().viewportHeight ?? 20; } catch {}
-        const half = halfPage(vh);
-        const page = pageStep(vh);
-        const cnt = countBuf.peek();
-        const lineCnt = cnt ?? 1;
-        switch (key) {
-          case "halfUp": curTui.scrollBy?.(-half * lineCnt); countBuf.reset(); break;
-          case "halfDown": curTui.scrollBy?.(half * lineCnt); countBuf.reset(); break;
-          case "pageDown": curTui.scrollBy?.(page * lineCnt); countBuf.reset(); break;
-          case "pageUp": curTui.scrollBy?.(-page * lineCnt); countBuf.reset(); break;
-          case "lineUp": curTui.scrollBy?.(-lineCnt); countBuf.reset(); break;
-          case "lineDown": curTui.scrollBy?.(lineCnt); countBuf.reset(); break;
-          case "bottom": curTui.scrollToBottom?.(); countBuf.reset(); break;
-          case "top":
-            if (d === "gg") {
-              gg.reset();
-              curTui.scrollToTop?.();
-              countBuf.reset();
-              updateLastSemantic(0);
-            } else if (gg.press()) {
-              curTui.scrollToTop?.();
-              countBuf.reset();
-              updateLastSemantic(0);
-            } else {
-              return { consume: true };
-            }
-            break;
-          case "other":
-            if (d.length === 1 && /[0-9]/.test(d)) {
-            } else {
-              if (isPrintable(d) || d.length === 1) {
-                if (/^[0-9]$/.test(d)) { /* 已处理 */ } else {}
-                return { consume: true };
-              }
-              if (d.length > 1 && !d.startsWith("\x1b[")) return { consume: true };
-              countBuf.reset();
-              bracketSeq.reset();
-              return undefined;
-            }
-            break;
-          default:
-            return undefined;
-        }
-        curTui.requestRender?.();
-        return { consume: true };
-      });
+      tt.addInputListener?.((d: string) => inputRoute(d));
     } catch {}
     return ed;
   };
   const mainFactory = (tui: TUI, theme: any, kb: any) => factory(tui, theme, kb);
   const readonlyEditorFactory = (ui: any) => {
     const fg = themeFg(ui?.theme);
-    return (tui: TUI, theme: any, kb: any) =>
-      new ReadonlyEditor(tui, theme, kb, { accent: (s: string) => fg("accent", s) }, searchUi);
+    return (tui: TUI, theme: any, kb: any) => {
+      const ro = new ReadonlyEditor(tui, theme, kb, { accent: (s: string) => fg("accent", s) }, searchUi);
+      // dialogOpen 焦点比对基准：READing 态下登记最新编辑器实例
+      currentReaderEditor = ro;
+      return ro;
+    };
   };
   const getActiveToggleLabel = (): string => {
     try {
@@ -1550,83 +1776,7 @@ export default function (pi: ExtensionAPI) {
   const installTerminalListener = (ctx: ExtensionContext) => {
     try { offTerminalInput?.(); } catch {}
     try {
-      offTerminalInput = ctx.ui.onTerminalInput?.((data: string) => {
-        if (helpOpen) return undefined;
-        const key = parseReadingKey(data);
-        if (key === "toggle") {
-          toggle();
-          try { (latestTui as any)?.requestRender?.(); } catch {}
-          return { consume: true };
-        }
-        if (!isReading) return undefined;
-        const tt: any = latestTui ?? (currentCtx as any)?.ui?.tui ?? (currentCtx as any)?.tui;
-        // SEARCH_INPUT：全量接收直到 enter
-        if (searchMode === SearchMode.INPUT) {
-          const r = handleSearchInput(data, tt, "terminal");
-          if (r !== undefined) {
-            try { (latestTui as any)?.requestRender?.(); } catch {}
-            return { consume: true };
-          }
-          return undefined;
-        }
-        if (key === "help") { showHelp(); try { (latestTui as any)?.requestRender?.(); } catch {} return { consume: true }; }
-        if (key === "exit") {
-          // esc 二义：有搜索栏就关闭取消高亮，否则退出阅读
-          if (isEscKey(data) || data === "\x1b") {
-            handleEsc(tt);
-            return { consume: true };
-          }
-          // i / ctrl+c 在有搜索时先清搜索
-          if (searchMode !== SearchMode.INACTIVE || hasActiveSearch(tt)) {
-            closeSearchAndReset(tt);
-            return { consume: true };
-          }
-          toggle(); try { (latestTui as any)?.requestRender?.(); } catch {} return { consume: true }; }
-        // app.tools.expand（显式绑定键优先于固定白名单的语义导航，plan §9.2）
-        try {
-          if (latestKb?.matches?.(data, "app.tools.expand") === true) {
-            if (isDuplicateNav(data, "terminal")) return { consume: true };
-            toggleToolsExpandedWithAnchor((m) => flash(tt, m));
-            try { (latestTui as any)?.requestRender?.(); } catch {}
-            return { consume: true };
-          }
-        } catch {}
-        if (isDuplicateNav(data, "terminal")) return { consume: true };
-        if (tryHandleReadingNav(data, tt)) {
-          try { (latestTui as any)?.requestRender?.(); } catch {}
-          return { consume: true };
-        }
-        let vh = 20;
-        try { vh = tt?.getPrimaryScrollView?.().viewportHeight ?? (latestTui as any)?.getPrimaryScrollView?.().viewportHeight ?? 20; } catch {}
-        const half = halfPage(vh);
-        const page = pageStep(vh);
-        let handled = true;
-        const cnt = countBuf.peek();
-        const lineCnt = cnt ?? 1;
-        switch (key) {
-          case "halfUp": tt?.scrollBy?.(-half * lineCnt); countBuf.reset(); break;
-          case "halfDown": tt?.scrollBy?.(half * lineCnt); countBuf.reset(); break;
-          case "pageDown": tt?.scrollBy?.(page * lineCnt); countBuf.reset(); break;
-          case "pageUp": tt?.scrollBy?.(-page * lineCnt); countBuf.reset(); break;
-          case "lineUp": tt?.scrollBy?.(-lineCnt); countBuf.reset(); break;
-          case "lineDown": tt?.scrollBy?.(lineCnt); countBuf.reset(); break;
-          case "bottom": tt?.scrollToBottom?.(); countBuf.reset(); break;
-          case "top":
-            if (data === "gg") { gg.reset(); tt?.scrollToTop?.(); countBuf.reset(); updateLastSemantic(0); }
-            else if (gg.press()) { tt?.scrollToTop?.(); countBuf.reset(); updateLastSemantic(0); }
-            else { return { consume: true }; }
-            break;
-          case "other":
-            if (data.length > 1 && data.startsWith("\x1b[")) {
-              handled = false;
-              break;
-            }
-            break;
-          default: handled = false; break;
-        }
-        try { (latestTui as any)?.requestRender?.(); } catch {}
-        return handled ? { consume: true } : undefined;
-      }) as any;
+      offTerminalInput = ctx.ui.onTerminalInput?.((data: string) => terminalRoute(data)) as any;
     } catch {}
   };
   const handleSession = async (_event: any, ctx: ExtensionContext) => {
@@ -1634,6 +1784,10 @@ export default function (pi: ExtensionAPI) {
     isReading = false;
     helpOpen = false;
     listenerInstalled = false;
+    // 弹窗探测基准重置：不依赖「resetExtensionUI 清 listener → 工厂先行重登」的间接时序
+    currentReaderEditor = undefined;
+    currentHelpComponent = undefined;
+    helpClose = undefined;
     gg.reset();
     countBuf.reset();
     bracketSeq.reset();
@@ -1665,7 +1819,13 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown" as any, async (_e: any, ctx: ExtensionContext) => refreshCtx(ctx));
 
   const cmdHandler = async (_args: string, ctx: ExtensionContext) => {
-    toggle(ctx);
+    const applied = toggle(ctx);
+    if (!applied) {
+      // 纵深防御路径（弹窗持焦时命令输入天然不可达）：不宣称未发生的状态翻转
+      const label = getActiveToggleLabel();
+      ctx.ui.notify(`外部弹窗持有焦点，已忽略 ${label} 阅读模式切换`, "info");
+      return;
+    }
     const label = getActiveToggleLabel();
     ctx.ui.notify(isReading
       ? `已进入阅读模式（${label} 切换）：ctrl-u/d 半页 f/b 整页 gg/G 顶底 j/k 行 esc/i 退出，? 帮助`

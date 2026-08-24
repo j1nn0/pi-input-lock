@@ -446,10 +446,10 @@ describe("pi-reader: ScrollRestoreMonitor", () => {
   });
 });
 
-describe("pi-reader: isAutoExpandToolsEnabled（需求 A 默认值兑底）", () => {
-  it("VITEST 空配置下默认 true", () => {
+describe("pi-reader: isAutoExpandToolsEnabled（默认值兑底）", () => {
+  it("VITEST 空配置下默认 false（工具状态保持不动，位置天然无损）", () => {
     __resetNavConfigCacheForTest();
-    expect(isAutoExpandToolsEnabled()).toBe(true);
+    expect(isAutoExpandToolsEnabled()).toBe(false);
   });
 });
 

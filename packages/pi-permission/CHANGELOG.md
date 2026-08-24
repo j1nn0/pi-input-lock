@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.2] - 2026-08-24
+
+### Fixed
+
+- Tests no longer leak temp dirs into the real home directory: the `outside` fixture in `test/path.test.ts` (symlink-escape regression case) was never cleaned up, leaving one `~/pi-permission-outside-*` dir behind on every test run; it is now removed together with `root` in a single `finally`. The `~/`-prefixed logDir case in `test/config-audit.test.ts` now wraps its write and assertions in `try/finally` so `~/pi-permission-test-tilde-*` is cleaned up even when assertions fail.
+
 ## [1.0.1] - 2026-08-22
 
 Hardening patch after the issue #1 security review (all 6 flaws closed, see commits 00b2d50 / 57cc985).

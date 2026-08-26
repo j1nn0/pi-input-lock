@@ -8,8 +8,10 @@ import {
   hasPipeToShell,
   parseBashCommand,
   type BashSegment,
+  type ParsedCommand,
 } from "./bash.ts";
-import { expandHome, isSensitivePath, isSensitiveReadException, isTrustedPath, isWithinCwd, realpathDeep, realpathOf } from "./path.ts";
+import { POWERSHELL_ADAPTER } from "./powershell.ts";
+import { expandHome, isSensitivePath, isSensitiveReadException, isTrustedPath, isWithinCwd, realpathOf, resolveCwdTarget } from "./path.ts";
 
 export type DecisionAction = "allow" | "ask" | "deny";
 
@@ -41,6 +43,55 @@ export interface BashDecisionRequest {
   command: string;
 }
 
+/**
+ * Shell 工具适配器（NFR：bash 与 powershell 共用同一决策核心）。
+ * 各解析器产出统一的 ParsedCommand/BashSegment 形状，决策表、确认 UI、审计零改动复用。
+ */
+export interface ShellAdapter {
+  /** 展示用标识（`[bash]` / `[powershell]` 前缀与弹窗详情前缀）。 */
+  id: string;
+  /** 解析命令为顶层段结构。 */
+  parse(command: string): ParsedCommand;
+  /** 单段效果分类（R/W/X + 危险叠加）。 */
+  classify(segment: BashSegment, config: PermissionConfig): SegmentClassLike;
+  /** 段内读取型路径引用。 */
+  readRefs(segment: BashSegment): string[];
+  /** 段内写入目标。 */
+  writeTargets(segment: BashSegment): string[];
+  /** 管道到 shell 检测（FR-4 等价叠加）。 */
+  pipeToShell(segments: readonly BashSegment[]): boolean;
+  /**
+   * 解析某段执行后的有效工作目录（C1：切目录语义由适配器全权负责）。
+   * 返回 current 表示 cwd 不变（非切目录命令，或 push-location 无参仅入栈）；
+   * 返回 undefined 表示无法静态跟踪（如 pop-location、cd -），后续相对路径保守按域外处理。
+   */
+  resolveCwdChange(program: string, args: readonly string[], current: string | undefined): string | undefined;
+}
+/** 分类结果最小结构（兼容 bash/powershell 两套 SegmentClassification）。 */
+interface SegmentClassLike {
+  tier: "R" | "W" | "X";
+  danger: boolean;
+  id: string;
+}
+
+/** bash 适配器：直接绑定 src/bash.ts 的解析与分类实现。 */
+const BASH_ADAPTER: ShellAdapter = {
+  id: "bash",
+  parse: parseBashCommand,
+  classify: classifySegment,
+  readRefs: collectReadRefs,
+  writeTargets: collectWriteTargets,
+  pipeToShell: hasPipeToShell,
+  resolveCwdChange(program, args, current) {
+    if (program !== "cd") return current;
+    const positional = args.filter((a) => !a.startsWith("-"))[0];
+    if (positional === undefined) return home(); // 无参数 cd → HOME
+    if (positional === "-") return undefined; // cd - 无法跟踪
+    if (current === undefined) return undefined;
+    return resolveCwdTarget(positional, current);
+  },
+};
+
 const home = () => os.homedir();
 
 /** 弹窗展示用命令：空白归一化单行 + 中段省略。
@@ -56,10 +107,10 @@ function displayCommand(command: string): string {
 }
 
 /** 复杂命令按顶层段分行展示（≤8 行），超限回退单行中段省略。 */
-function displaySegmented(parsed: { segments: { raw: string; prevOp: string }[] }, command: string): string {
+function displaySegmented(label: string, parsed: { segments: { raw: string; prevOp: string }[] }, command: string): string {
   const segs = parsed.segments;
-  if (segs.length <= 1 || segs.length > 8) return `bash: ${displayCommand(command)}`;
-  const lines = [`bash:`];
+  if (segs.length <= 1 || segs.length > 8) return `${label}: ${displayCommand(command)}`;
+  const lines = [`${label}:`];
   for (let i = 0; i < segs.length; i++) {
     const s = segs[i]!;
     const prefix = i === 0 ? "  " : `  ${s.prevOp} `;
@@ -68,9 +119,9 @@ function displaySegmented(parsed: { segments: { raw: string; prevOp: string }[] 
   return lines.join("\n");
 }
 
-/** ask 弹窗触发主体展示行：details 尾部统一加 `bash:<command>`（复杂命令分行）/ `tool:<tool_name>`，与 reason 前缀同源。 */
-const bashDetail = (command: string, parsed?: { segments: { raw: string; prevOp: string }[] }) =>
-  parsed === undefined ? `bash: ${displayCommand(command)}` : displaySegmented(parsed, command);
+/** ask 弹窗触发主体展示行：details 尾部统一加 `<shell>:<command>`（复杂命令分行），与 reason 前缀同源。 */
+const shellDetail = (label: string, command: string, parsed?: { segments: { raw: string; prevOp: string }[] }) =>
+  parsed === undefined ? `${label}: ${displayCommand(command)}` : displaySegmented(label, parsed, command);
 
 /** trusted 外部路径前缀：配置项 ∪ 系统临时目录（os.tmpdir()），去重。 */
 function trustedPrefixes(cfg: PermissionConfig): string[] {
@@ -186,7 +237,7 @@ export function decideToolRequest(req: ToolDecisionRequest): Decision {
   return { action: "allow", rule: "FR-2", reason: `${label} inside project, allowed` };
 }
 
-function failClosed(mode: WorkMode, label: string, kind: string, command?: string): Decision {
+function failClosed(mode: WorkMode, label: string, kind: string, command?: string, detailLabel?: string): Decision {
   // B+ S5 指令式文案：类别 + 改道（拆步骤、去命令替换）
   const msg = `${label} Unverifiable syntax (${kind}). Split into simple sequential commands without $(...)`;
   return mode === "plan"
@@ -196,81 +247,74 @@ function failClosed(mode: WorkMode, label: string, kind: string, command?: strin
         rule: "FR-7",
         reason: msg,
         // ask 必须带触发命令，否则弹窗无上下文，用户无法定位问题
-        details: command === undefined ? undefined : [bashDetail(command)],
+        details: command === undefined ? undefined : [shellDetail(detailLabel ?? label, command)],
       };
 }
 
 /**
  * 跟踪链式命令中的 cd，返回每段执行时的有效工作目录。
- * `cd` 无参数 → HOME；`cd -` 或参数无法解析 → undefined（后续相对路径保守按外部处理）；
- * 其他段返回沿用当前目录。
+ * 切目录语义由适配器提供（powershell 的 Set-Location/Push-Location/Pop-Location 等）：
+ * Pop-Location 弹出栈目标不可静态跟踪 → 返回 undefined，后续相对路径保守按外部处理。
  */
-function resolveSegmentCwds(segments: readonly BashSegment[], initialCwd: string): (string | undefined)[] {
+function resolveSegmentCwds(
+  segments: readonly BashSegment[],
+  initialCwd: string,
+  adapter: ShellAdapter,
+): (string | undefined)[] {
   const result: (string | undefined)[] = [];
   let current: string | undefined = initialCwd;
   for (const seg of segments) {
-    result.push(current); // 本段在 cd 之前执行，用切换前的目录
-    if (seg.program === "cd") {
-      const positional = seg.args.filter((a) => !a.startsWith("-"))[0];
-      if (positional === undefined) {
-        current = home(); // 无参数 cd → HOME
-      } else if (positional === "-") {
-        current = undefined; // cd - 无法跟踪 → uncertain
-      } else if (current !== undefined) {
-        const abs = path.resolve(current, expandHome(positional, home()));
-        current = realpathDeep(abs) ?? abs;
-      }
-    }
+    result.push(current); // 本段在切目录之前执行，用切换前的目录
+    current = adapter.resolveCwdChange(seg.program, seg.args, current);
   }
   return result;
 }
 
 /** bash 级决策。
+/** 通用 shell 级决策核心：bash 与 powershell 共用（适配器提供解析/分类实现）。
  * plan（不分 cwd 内外）：明确写/敏感操作 deny → 敏感文件 ask → read 白名单 allow → other ask/deny(strict)
- * build：敏感操作 ask → 敏感文件 ask → cwd 外（read 白名单 allow / other ask）；cwd 内 allow
+ * build：危险操作 ask → 敏感文件 ask → cwd 外（read 白名单 allow / other ask）；cwd 内 allow
  */
-export function decideBashRequest(req: BashDecisionRequest): Decision {
+export function decideShellRequest(req: BashDecisionRequest, adapter: ShellAdapter): Decision {
   const { mode, config, cwd, command } = req;
-  const label = "[bash]";
-  const parsed = parseBashCommand(command);
+  const label = `[${adapter.id}]`;
+  const parsed = adapter.parse(command);
 
   // yolo：彻底放行但敏感文件仍 deny（跳过 fail-closed / 管道等检查）
   if (mode === "yolo") {
     // 复用段 cwd 缓存，避免每轮重算
-    const yoloSegmentCwds = resolveSegmentCwds(parsed.segments, cwd);
+    const yoloSegmentCwds = resolveSegmentCwds(parsed.segments, cwd, adapter);
     const yoloSensitive = (() => {
       for (let i = 0; i < parsed.segments.length; i++) {
         const seg = parsed.segments[i]!;
         const segCwd = yoloSegmentCwds[i] ?? cwd;
-        const readRefs = collectReadRefs(seg);
-        const writeTargets = collectWriteTargets(seg);
+        const readRefs = adapter.readRefs(seg);
+        const writeTargets = adapter.writeTargets(seg);
         const hit = sensitiveDecision([...readRefs, ...writeTargets], segCwd, config, readRefs, label);
         if (hit) return hit;
       }
       return undefined;
     })();
     if (yoloSensitive) {
-      return { action: "deny", rule: "FR-1", reason: yoloSensitive.reason, details: [...(yoloSensitive.details ?? []), bashDetail(command)] };
+      return { action: "deny", rule: "FR-1", reason: yoloSensitive.reason, details: [...(yoloSensitive.details ?? []), shellDetail(adapter.id, command)] };
     }
     // 即使含复杂语法/管道也放行（yolo bypass）
     return { action: "allow", rule: "yolo", reason: `[yolo] yolo mode, all operations allowed` };
   }
 
   // FR-7 fail-closed：语法无法解析 / 含复杂语法 → build=ask、plan=deny
-  if (parsed.parseError) return failClosed(mode, label, "unparseable", command);
+  if (parsed.parseError) return failClosed(mode, label, "unparseable", command, adapter.id);
   if (parsed.hasCommandSubstitution || parsed.hasProcessSubstitution || parsed.hasSubshell) {
-    return failClosed(mode, label, "command substitution/subshell", command);
+    return failClosed(mode, label, "command substitution/subshell", command, adapter.id);
   }
 
   if (parsed.segments.length === 0) {
     return { action: "allow", rule: "default", reason: `${label} empty command` };
   }
 
-  // 管道到 shell（curl | sh）：并入危险叠加，走决策表第①步
-
   // 跟踪 cd：每段的有效工作目录（cd 后相对路径按新目录解析，防 cd 到外部绕过）
-  // cd 无法解析（如 `cd -`）时置 undefined，后续相对路径引用保守按外部处理
-  const segmentCwds = resolveSegmentCwds(parsed.segments, cwd);
+  // cd 无法解析（如 `cd -`）时置 undefined，后续相对路径保守按外部处理
+  const segmentCwds = resolveSegmentCwds(parsed.segments, cwd, adapter);
   const uncertainRelative = segmentCwds.includes(undefined);
 
   // 收集段信息（相对路径按各段有效 cwd 判定内外）
@@ -289,8 +333,8 @@ export function decideBashRequest(req: BashDecisionRequest): Decision {
   for (let i = 0; i < parsed.segments.length; i++) {
     const seg = parsed.segments[i]!;
     const segCwd = segmentCwds[i] ?? cwd;
-    const readRefs = collectReadRefs(seg);
-    const writeTargets = collectWriteTargets(seg);
+    const readRefs = adapter.readRefs(seg);
+    const writeTargets = adapter.writeTargets(seg);
     for (const r of readRefs) {
       const external = uncertainRelative && !path.isAbsolute(r) ? true : !isWithinCwd(r, segCwd, home());
       if (external) {
@@ -318,20 +362,20 @@ export function decideBashRequest(req: BashDecisionRequest): Decision {
     for (let i = 0; i < parsed.segments.length; i++) {
       const seg = parsed.segments[i]!;
       const segCwd = segmentCwds[i] ?? cwd;
-      const readRefs = collectReadRefs(seg);
-      const writeTargets = collectWriteTargets(seg);
+      const readRefs = adapter.readRefs(seg);
+      const writeTargets = adapter.writeTargets(seg);
       const hit = sensitiveDecision([...readRefs, ...writeTargets], segCwd, config, readRefs, label);
       if (hit) return hit;
     }
     return undefined;
   };
 
-  const kinds = parsed.segments.map((seg) => classifySegment(seg, config));
-  const dangerAny = kinds.some((k) => k.danger) || hasPipeToShell(parsed.segments);
+  const kinds = parsed.segments.map((seg) => adapter.classify(seg, config));
+  const dangerAny = kinds.some((k) => k.danger) || adapter.pipeToShell(parsed.segments);
   const hasX = kinds.some((k) => k.tier === "X");
   const allPureR = kinds.every((k) => k.tier === "R");
   // 会话批准记忆 id：危险 > 不透明 > 有界写 > 纯读，取最严段的标识
-  const rankOf = (k: (typeof kinds)[number]) => (k.danger ? 3 : k.tier === "X" ? 2 : k.tier === "W" ? 1 : 0);
+  const rankOf = (k: SegmentClassLike) => (k.danger ? 3 : k.tier === "X" ? 2 : k.tier === "W" ? 1 : 0);
   let approvalId: string | undefined;
   let bestRank = -1;
   for (let i = 0; i < parsed.segments.length; i++) {
@@ -348,8 +392,8 @@ export function decideBashRequest(req: BashDecisionRequest): Decision {
       return {
         action: "deny",
         rule: "FR-8",
-        reason: `[bash] Dangerous op blocked in plan mode. No workarounds — switch to /build or continue read-only work.`,
-        details: [displaySegmented(parsed, command)],
+        reason: `${label} Dangerous op blocked in plan mode. No workarounds — switch to /build or continue read-only work.`,
+        details: [displaySegmented(adapter.id, parsed, command)],
         approvalId,
       };
     }
@@ -358,14 +402,14 @@ export function decideBashRequest(req: BashDecisionRequest): Decision {
       return {
         action: "deny",
         rule: "FR-8",
-        reason: `[bash] Plan mode forbids writes outside trusted paths. Continue read-only work or use /build for writes.`,
+        reason: `${label} Plan mode forbids writes outside trusted paths. Continue read-only work or use /build for writes.`,
         details: [...nonTrustedWriteTargets],
         approvalId,
       };
     }
     // ③ 涉及敏感文件（不分读写；能走到此处的写必然在 trusted 内）→ ask
     const sensitive = sensitiveBySegment();
-    if (sensitive) return { ...sensitive, details: [...(sensitive.details ?? []), displaySegmented(parsed, command)], approvalId };
+    if (sensitive) return { ...sensitive, details: [...(sensitive.details ?? []), displaySegmented(adapter.id, parsed, command)], approvalId };
     // ④ 可证安全：所有段为 R 或 W（W 写目标已由②证明全 ∈ T_plan）→ allow
     if (!hasX) {
       return { action: "allow", rule: "FR-8", reason: `${label} provable read/trusted-write operations allowed`, approvalId };
@@ -375,16 +419,16 @@ export function decideBashRequest(req: BashDecisionRequest): Decision {
       return {
         action: "deny",
         rule: "FR-10",
-        reason: `[bash] Strict plan mode: unverifiable execution blocked. Use commands with provable effects, or switch to /build.`,
-        details: [displaySegmented(parsed, command)],
+        reason: `${label} Strict plan mode: unverifiable execution blocked. Use commands with provable effects, or switch to /build.`,
+        details: [displaySegmented(adapter.id, parsed, command)],
         approvalId,
       };
     }
     return {
       action: "ask",
       rule: "FR-10",
-      reason: `[bash] opaque execution cannot be verified in plan mode — the command may write anywhere`,
-      details: [displaySegmented(parsed, command)],
+      reason: `${label} opaque execution cannot be verified in plan mode — the command may write anywhere`,
+      details: [displaySegmented(adapter.id, parsed, command)],
       approvalId,
     };
   }
@@ -392,11 +436,11 @@ export function decideBashRequest(req: BashDecisionRequest): Decision {
   // build 模式
   // ① 危险叠加命中 → ask
   if (dangerAny) {
-    return { action: "ask", rule: "FR-4", reason: `${label} dangerous operation requires confirmation`, details: [bashDetail(command, parsed)], approvalId };
+    return { action: "ask", rule: "FR-4", reason: `${label} dangerous operation requires confirmation`, details: [shellDetail(adapter.id, command, parsed)], approvalId };
   }
   // ② 涉及敏感文件（不分读写）→ ask
   const sensitive = sensitiveBySegment();
-  if (sensitive) return { ...sensitive, details: [...(sensitive.details ?? []), bashDetail(command, parsed)], approvalId };
+  if (sensitive) return { ...sensitive, details: [...(sensitive.details ?? []), shellDetail(adapter.id, command, parsed)], approvalId };
   // ③ 所有段的引用与写目标全部 ∈ T_build（cwd ∪ trusted）→ allow（R/W/X 同权）
   if (nonTrustedExternalRefs.length === 0 && nonTrustedExternalTargets.length === 0) {
     return { action: "allow", rule: "FR-5", reason: `${label} inside trust domain, allowed`, approvalId };
@@ -411,7 +455,7 @@ export function decideBashRequest(req: BashDecisionRequest): Decision {
       action: "ask",
       rule: "FR-3",
       reason: `${label} writing outside project requires confirmation`,
-      details: [...nonTrustedExternalTargets, bashDetail(command, parsed)],
+      details: [...nonTrustedExternalTargets, shellDetail(adapter.id, command, parsed)],
       approvalId,
     };
   }
@@ -419,7 +463,17 @@ export function decideBashRequest(req: BashDecisionRequest): Decision {
     action: "ask",
     rule: "FR-10",
     reason: `${label} external path referenced by an unverifiable command requires confirmation`,
-    details: [...nonTrustedExternalRefs, bashDetail(command, parsed)],
+    details: [...nonTrustedExternalRefs, shellDetail(adapter.id, command, parsed)],
     approvalId,
   };
+}
+
+/** bash 工具决策入口。 */
+export function decideBashRequest(req: BashDecisionRequest): Decision {
+  return decideShellRequest(req, BASH_ADAPTER);
+}
+
+/** powershell 工具决策入口（pi 0.84.3+ Windows 可选工具）。 */
+export function decidePowerShellRequest(req: BashDecisionRequest): Decision {
+  return decideShellRequest(req, POWERSHELL_ADAPTER);
 }

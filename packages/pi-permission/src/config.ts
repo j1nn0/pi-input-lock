@@ -17,6 +17,14 @@ export interface PermissionConfig {
    * 固定规则不可配置：rm -r/-f、chmod -R、chown -R、curl/wget 管道到 shell、wrapper 命令（bash -c/eval/sudo/xargs/find -exec）。
    */
   dangerousBashCommands: string[];
+  /** PowerShell 只读 cmdlet 白名单（FR-5 等价），规范名命中即视为只读；别名在分类前已归一化。 */
+  readonlyPowerShellCommands: string[];
+  /**
+   * 危险 PowerShell 命令清单（FR-4 等价，仅作用于 powershell 工具），条目为规范 cmdlet 名或原生 exe 名（小写）。
+   * 固定规则不可配置：iex/Invoke-Expression、icm/Invoke-Command、Set-ExecutionPolicy、sc（二义性保守）、
+   * Remove-Item -Recurse/-Force、嵌套 pwsh/powershell 解释器、调用操作符 & / 点源 / 脚本块、irm|iex 类管道执行。
+   */
+  dangerousPowerShellCommands: string[];
   /** trusted 外部路径前缀（FR-9）：落在前缀下的外部读写直接放行（如 `/tmp` 临时文件）；
    * realpath 双形态防软链逃逸；仅作用于目录放行层面，不改变危险/敏感判定的优先级。 */
   trustedExternalPaths: string[];
@@ -88,6 +96,44 @@ export const DEFAULT_CONFIG: PermissionConfig = {
     // 网络/防火墙
     "iptables", "ip6tables", "ufw", "firewall-cmd",
   ],
+  readonlyPowerShellCommands: [
+    // 目录/内容读取
+    "get-childitem", "get-content", "get-item", "get-itemproperty", "get-location",
+    "get-filehash", "get-authenticodesignature", "get-acl",
+    "test-path", "resolve-path", "join-path", "split-path", "format-hex",
+    "import-csv", "import-clixml", "import-powershelldatafile",
+    "test-connection", "test-netconnection",
+    // 对象/系统信息查询
+    "get-process", "get-service", "get-command", "get-help", "get-member",
+    "get-variable", "get-alias", "get-psdrive", "get-psprovider", "get-wmiobject",
+    "get-date", "get-random", "get-culture", "get-uiculture", "get-host", "get-verb",
+    "get-eventlog", "get-winevent", "get-computerinfo", "get-history", "get-module",
+    "get-itempropertyvalue", "get-clipboard",
+    // 文本过滤/排序/比较/格式化
+    "select-string", "select-object", "select-xml", "where-object", "foreach-object",
+    "sort-object", "group-object", "measure-object", "measure-command", "compare-object",
+    "format-table", "format-list", "format-wide", "format-custom",
+    "convertto-json", "convertto-csv", "convertto-html", "convertto-xml",
+    "convertfrom-json", "convertfrom-csv", "convertfrom-stringdata",
+    // 输出与会话内建
+    "out-string", "out-host", "out-default", "out-null",
+    "write-output", "write-host", "write-warning", "write-error",
+    "write-verbose", "write-debug", "write-information", "write-progress",
+    "clear-host", "start-sleep", "push-location", "pop-location", "exit",
+  ],
+  dangerousPowerShellCommands: [
+    // 远程/任意代码执行
+    "start-process", "saps", "new-psdrive",
+    // 服务/进程控制
+    "stop-process", "kill", "stop-service", "set-service", "new-service", "start-service",
+    // 系统/计划任务/注册表/磁盘
+    "register-scheduledtask", "schtasks", "reg", "wmic", "diskpart", "format-volume",
+    "restart-computer", "stop-computer", "clear-eventlog", "remove-computer",
+    // 动态编译与模块加载（模块代码任意执行）
+    "add-type", "new-object", "import-module", "invoke-item", "invoke-wmimethod", "invoke-cimmethod",
+    // 后台作业（脚本块任意执行，wrapper 已兜底，显式列出便于配置感知）
+    "start-job", "receive-job",
+  ],
   // trusted 外部路径：默认 `/tmp`（运行时并入 os.tmpdir() 系统临时目录），可配置追加
   trustedExternalPaths: ["/tmp"],
   // 仅 pi 核心内置只读工具（createReadOnlyTools：read/grep/find/ls）；
@@ -108,6 +154,8 @@ const ARRAY_FIELDS = new Set<keyof PermissionConfig>([
   "sensitivePatterns",
   "readonlyBashCommands",
   "dangerousBashCommands",
+  "readonlyPowerShellCommands",
+  "dangerousPowerShellCommands",
   "trustedExternalPaths",
   "readonlyTools",
 ]);

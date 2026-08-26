@@ -97,6 +97,8 @@ Merged by layer (array fields are **union**-deduplicated across layers, non-arra
 | `envExampleReadAllowed` | Allow reading `.env.example` without prompt | `true` |
 | `readonlyBashCommands` | Bash read allowlist | High-frequency read-only commands (cat/grep/ls/..., 72 entries) |
 | `dangerousBashCommands` | Unified dangerous operation list (`sudo` or `git commit`) | Git write subcommands + dangerous shell |
+| `readonlyPowerShellCommands` | PowerShell read allowlist (canonical cmdlet names, aliases normalized before matching) | Read-only cmdlets (`get-childitem`/`get-content`/`select-string`/...) |
+| `dangerousPowerShellCommands` | PowerShell dangerous operation list | `start-process` / `add-type` / `register-scheduledtask` / ... |
 | `trustedExternalPaths` | Trusted external path prefixes — reads/writes under these prefixes are auto-allowed (e.g. `/tmp` for temp files; `os.tmpdir()` is merged at runtime) | `["/tmp"]` |
 | `readonlyTools` | Tool read allowlist (union across layers) | `read grep find ls` |
 | `strictPlanMode` | Plan mode: unverifiable execution (X segments) tightened from ask to silent deny | `false` |
@@ -109,6 +111,14 @@ Merged by layer (array fields are **union**-deduplicated across layers, non-arra
 > `curl/wget | sh/bash`, `bash -c`/`eval`/`sudo`/`xargs`/`find -exec` are always treated as dangerous;
 > redirect targets `>`/`>>` are always checked; git subcommands not in `dangerousBashCommands` are treated as read-only.
 > Prompt reasons carry a `[bash]` / `[tool:<name>]` source prefix and include configuration hints.
+>
+> **PowerShell tool** (pi 0.84.3+, Windows, opt-in via `defaultTools: [... "powershell"]`): same R/W/X pipeline as bash.
+> Aliases are normalized first (`gci`→`get-childitem`, `rm`→`remove-item`, `cat`→`get-content`, ...); native exes (git/node/npm)
+> reuse the bash registries. Fixed PowerShell dangers (not configurable): `iex`/`Invoke-Expression`, `icm`/`Invoke-Command`,
+> `Set-ExecutionPolicy`, nested `pwsh`/`powershell` invocations (incl. `-EncodedCommand`), call operator `&`, dot-sourcing,
+> script blocks `{...}`, `Remove-Item -Recurse/-Force`, and pipe-to-shell (`irm|iex`). `$()` subexpressions, bare grouping,
+> splatting and here-strings are fail-closed. Ambiguous names stay conservative: `curl`/`wget` are X (PS 5.1 alias vs PS 7 exe),
+> `sc` is always treated as the service controller.
 >
 > **Log location**: defaults to `~/.pi/agent/logs/pi-permission/<project>/pi-permission-{review,debug}.jsonl` (co-located with `pi-debug.log`), isolated per project, files `0600`, dirs `0700`, with size-based rotation. The extension directory `~/.pi/agent/extensions/pi-permission` holds only `config.json`. Custom paths support absolute and `~/` forms, e.g. `"logDir": "~/my-logs/pi-permission"` or `"/var/log/pi-permission"`.
 >

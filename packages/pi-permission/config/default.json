@@ -152,6 +152,35 @@
     "ufw",
     "firewall-cmd"
   ],
+  "readonlyPowerShellCommands": [
+    "get-childitem", "get-content", "get-item", "get-itemproperty", "get-location",
+    "get-filehash", "get-authenticodesignature", "get-acl",
+    "test-path", "resolve-path", "join-path", "split-path", "format-hex",
+    "import-csv", "import-clixml", "import-powershelldatafile",
+    "test-connection", "test-netconnection",
+    "get-process", "get-service", "get-command", "get-help", "get-member",
+    "get-variable", "get-alias", "get-psdrive", "get-psprovider", "get-wmiobject",
+    "get-date", "get-random", "get-culture", "get-uiculture", "get-host", "get-verb",
+    "get-eventlog", "get-winevent", "get-computerinfo", "get-history", "get-module",
+    "get-itempropertyvalue", "get-clipboard",
+    "select-string", "select-object", "select-xml", "where-object", "foreach-object",
+    "sort-object", "group-object", "measure-object", "measure-command", "compare-object",
+    "format-table", "format-list", "format-wide", "format-custom",
+    "convertto-json", "convertto-csv", "convertto-html", "convertto-xml",
+    "convertfrom-json", "convertfrom-csv", "convertfrom-stringdata",
+    "out-string", "out-host", "out-default", "out-null",
+    "write-output", "write-host", "write-warning", "write-error",
+    "write-verbose", "write-debug", "write-information", "write-progress",
+    "clear-host", "start-sleep", "push-location", "pop-location", "exit"
+  ],
+  "dangerousPowerShellCommands": [
+    "start-process", "saps", "new-psdrive",
+    "stop-process", "kill", "stop-service", "set-service", "new-service", "start-service",
+    "register-scheduledtask", "schtasks", "reg", "wmic", "diskpart", "format-volume",
+    "restart-computer", "stop-computer", "clear-eventlog", "remove-computer",
+    "add-type", "new-object", "import-module", "invoke-item", "invoke-wmimethod", "invoke-cimmethod",
+    "start-job", "receive-job"
+  ],
   "trustedExternalPaths": [
     "/tmp"
   ],

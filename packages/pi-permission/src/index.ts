@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { getAgentDir, loadConfig, type PermissionConfig } from "./config.ts";
-import { decideBashRequest, decideToolRequest, type Decision, type WorkMode } from "./decision.ts";
+import { decideBashRequest, decidePowerShellRequest, decideToolRequest, type Decision, type WorkMode } from "./decision.ts";
 import { BUILD_SWITCH_NOTICE, ModeStore, PLAN_SYSTEM_PROMPT, registerModeCommands, sessionKey, statusText, YOLO_SWITCH_NOTICE } from "./mode.ts";
 import { registerToolsCommand } from "./tools.ts";
 import { createConfirmer, type Confirmer } from "./ui.ts";
@@ -29,7 +29,8 @@ function approvalKey(decision: Decision, toolName: string, detail: string | unde
     case "FR-4":
       return `dangerous:${toolName}:${decision.approvalId ?? d}`;
     case "FR-10":
-      return `unverified:${mode}:${decision.approvalId ?? toolName}`;
+      // 键含工具名（review P2-2）：powershell 下批准的执行器不得免问 bash 同名 X 程序，反之亦然
+      return `unverified:${toolName}:${mode}:${decision.approvalId ?? toolName}`;
     case "FR-7":
       return `fail-closed:${toolName}`;
     case "FR-8":
@@ -51,6 +52,11 @@ const CONFIG_HINTS: Record<string, string> = {
 function toolIsBashLike(event: ToolCallEvent): boolean {
   const input = event.input as unknown as { command?: unknown };
   return event.toolName === "exec_command" && typeof input.command === "string";
+}
+
+/** pi 0.84.3+ Windows 可选 powershell 工具（input schema 与 bash 相同：{ command, timeout?}）。 */
+function toolIsPowerShell(event: ToolCallEvent): boolean {
+  return event.toolName === "powershell";
 }
 
 /** 从 ask 决策中提取用于批准记忆的详情（首个路径或原始命令）。 */
@@ -156,6 +162,18 @@ export default function (pi: ExtensionAPI) {
         toolName = "bash";
         commandDetail = bashInput.command;
         decision = decideBashRequest({ mode, config: cfg, cwd: ctx.cwd, command: bashInput.command });
+      } else if (toolIsPowerShell(event)) {
+        // powershell 工具：细粒度管线与 bash 对齐（别名归一化 + cmdlet 注册表 + 同一决策核心）。
+        // 注意：此前该工具落入 decideToolRequest 且因无 path 字段命中 FR-5 被静默放行（安全缺口）。
+        const psInput = event.input as unknown as { command?: unknown };
+        toolName = "powershell";
+        if (typeof psInput.command === "string") {
+          commandDetail = psInput.command;
+          decision = decidePowerShellRequest({ mode, config: cfg, cwd: ctx.cwd, command: psInput.command });
+        } else {
+          // schema 外的畸形入参 fail-closed（review P2-6）：不落入无 path 的 FR-5 静默放行
+          decision = { action: "ask", rule: "FR-10", reason: "[powershell] opaque tool input requires confirmation" };
+        }
       } else {
         toolName = event.toolName;
         decision = decideToolRequest({

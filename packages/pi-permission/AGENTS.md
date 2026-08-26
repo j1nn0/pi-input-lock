@@ -44,15 +44,16 @@ Pi coding agent 的权限控制扩展：按「效果可证明性 × 信任域」
 | -- | ---- |
 | `index.ts` | 工厂装配：tool_call 拦截、approvalKey 细粒度记忆（FR-10 键按模式隔离）、CONFIG_HINTS（每 rule 会话一次）、denyFeedback（用户拒绝 vs 规则拒绝双后缀）、/readonly-tools 装配 |
 | `bash.ts` | 自研简化解析器：顶层切分/token 化/重定向抽取、启动器前缀剥离、R/W/X 分类器（+ approvalId）、写动作扫描（find flag/sed -i/sort -o 等）、git 子命令三向归类 |
-| `decision.ts` | 双模式决策引擎（§上表）、displayCommand 中段省略与分行展示、resolveSegmentCwds cd 跟踪、yolo 短路 |
-| `path.ts` | normalizePath / realpathDeep（最深存在祖先解析，防父目录软链逃逸）/ isSensitivePath 三形态匹配 / isTrustedPath / isWithinCwd |
+| `powershell.ts` | PowerShell 同构管线（pi 0.84.3+ Windows 可选工具）：别名归一化、cmdlet 读/写/危险注册表（命名参数路径抽取）、固定危险形态（iex/icm/Set-ExecutionPolicy/& 调用操作符/点源/脚本块/Remove-Item -Recurse）、`$()`/裸括号/@splatting fail-closed、原生 exe 回退 bash 分类；导出 POWERSHELL_ADAPTER |
+| `decision.ts` | 双模式决策引擎（§上表）、ShellAdapter 通用核心（decideShellRequest，bash/powershell 共用决策表）、displayCommand 中段省略与分行展示、resolveSegmentCwds cd 跟踪、yolo 短路 |
+| `path.ts` | normalizePath / realpathDeep（最深存在祖先解析，防父目录软链逃逸）/ isSensitivePath 三形态匹配 / isTrustedPath / isWithinCwd（Windows 盘符与 UNC 绝对路径恒为域外） |
 | `config.ts` | DEFAULT_CONFIG 三注册表（读者/W/危险）+ 分层合并（数组并集）+ getAgentDir |
 | `mode.ts` | plan/build/yolo 状态机、/plan /build /yolo 命令、Alt+P 快捷键、系统提示注入（plan 常驻、build/yolo 切入首轮一次性公告） |
 | `tools.ts` | `/readonly-tools` 三级管理（session/project/global，每层只改自己，其他层锁定） |
 | `ui.ts` | y/s/n/r 四选项确认弹窗（r 进 emacs 输入自定义理由），无 UI 环境降级为 deny |
 | `audit.ts` | review/debug 双流 JSONL 日志：脱敏、字段宽度上限、按项目分目录、0600、大小轮转 |
 
-依赖方向：`index → decision / config / mode / tools / ui / audit`；`decision → bash / path / config`。
+依赖方向：`index → decision / config / mode / tools / ui / audit`；`decision → bash / powershell / path / config`。
 
 ## 设计约束（改动前必读）
 

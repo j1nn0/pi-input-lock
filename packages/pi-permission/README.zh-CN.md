@@ -95,6 +95,8 @@ pi install npm:@inobit/pi-permission
 | `envExampleReadAllowed` | `.env.example` 读取免弹窗 | `true` |
 | `readonlyBashCommands` | bash read 白名单 | 高频只读命令（cat/grep/ls/...，72 项） |
 | `dangerousBashCommands` | 敏感操作统一清单（`sudo` 或 `git commit`） | git 写子命令 + 危险 shell |
+| `readonlyPowerShellCommands` | PowerShell read 白名单（规范 cmdlet 名，匹配前别名已归一化） | 只读 cmdlet（get-childitem/get-content/select-string/...） |
+| `dangerousPowerShellCommands` | PowerShell 敏感操作清单 | start-process / add-type / register-scheduledtask / ... |
 | `trustedExternalPaths` | trusted 外部路径前缀：前缀下读写直接放行（如 `/tmp` 临时文件；运行时并入系统临时目录 `os.tmpdir()`） | `["/tmp"]` |
 | `readonlyTools` | 工具 read 白名单（各层并集） | `read grep find ls` |
 | `strictPlanMode` | plan 下不可证执行（X 段兜底）由 ask 收紧为静默 deny | `false` |
@@ -107,6 +109,9 @@ pi install npm:@inobit/pi-permission
 > `curl/wget | sh/bash`、`bash -c`/`eval`/`sudo`/`xargs`/`find -exec`、`find -delete/-fls/-fprint*` 恒为敏感操作或写动作；
 > 重定向 `>`/`>>` 写目标固定检测；启动器前缀（`env`/`nice`/`timeout N`/`nohup`/`setsid`/`stdbuf`/`VAR=x`）自动剥离后按真实程序分类（`sudo` 不剥离直接拦截）；git 未识别子命令按 X 处理。
 > 弹窗 reason 带 `[bash]` / `[tool:<name>]` 来源前缀；hint 每 rule 会话内只展示一次。
+>
+> **PowerShell 工具**（pi 0.84.3+，仅 Windows，需在 `defaultTools` 中显式启用）：与 bash 同一套 R/W/X 管线。别名先归一化（`gci`→`get-childitem`、`rm`→`remove-item`、`cat`→`get-content` 等）；原生 exe（git/node/npm）回退复用 bash 注册表。
+> PowerShell 固定危险形态（不可配置）：`iex`/`Invoke-Expression`、`icm`/`Invoke-Command`、`Set-ExecutionPolicy`、嵌套 `pwsh`/`powershell` 调用（含 `-EncodedCommand`）、调用操作符 `&`、点源 `. ./x.ps1`、脚本块 `{...}`、`Remove-Item -Recurse/-Force`、管道执行（`irm|iex`）；`$()` 子表达式、裸括号分组、@splattting、here-string 一律 fail-closed。二义性名称保守处理：`curl`/`wget` 按 X（PS 5.1 别名 vs PS 7 真 exe），`sc` 恒按服务控制器处理。
 >
 > **日志位置**：默认 `~/.pi/agent/logs/pi-permission/<project>/pi-permission-{review,debug}.jsonl`（更规范，与 `pi-debug.log` 同级），按项目分目录隔离，文件 `0600`、目录 `0700`、支持大小轮转。扩展目录 `~/.pi/agent/extensions/pi-permission` 仅放 `config.json`。自定义可用绝对路径或 `~/`，如 `"logDir": "~/my-logs/pi-permission"` 或 `"/var/log/pi-permission"`。
 >

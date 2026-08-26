@@ -339,8 +339,8 @@ function tokenizeSegment(raw: string): { tokens: string[]; redirects: Redirect[]
   return { tokens, redirects, error };
 }
 
-/** 提取 git 子命令（跳过带值的全局选项如 `-C dir`、`-c key=val`）。 */
-function extractGit(args: string[]): { subcommand?: string; gitArgs: string[] } {
+/** 提取 git 子命令（跳过带值的全局选项如 `-C dir`、`-c key=val`）。导出供 powershell.ts 解析原生 git 调用复用。 */
+export function extractGit(args: string[]): { subcommand?: string; gitArgs: string[] } {
   const rest = args.slice(1);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i]!;

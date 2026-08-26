@@ -152,3 +152,14 @@ describe("父目录软链逃逸（issue #1 缺陷 6 回归）", () => {
     }
   });
 });
+
+describe("Windows 风格绝对路径（powershell 工具回归）", () => {
+  it("盘符路径与 UNC 路径在任何平台都判定为 cwd 外", () => {
+    expect(isWithinCwd("C:\\Users\\me\\file.txt", "/proj", HOME)).toBe(false);
+    expect(isWithinCwd("D:/data/out.txt", "/proj", HOME)).toBe(false);
+    expect(isWithinCwd("\\\\server\\share\\f.txt", "/proj", HOME)).toBe(false);
+    // POSIX resolve 会把 `C:\x` 当相对路径拼进 cwd，此处防回归
+    expect(isWithinCwd("C:\\proj\\file.txt", "/proj", HOME)).toBe(false);
+    expect(isWithinCwd("./local.txt", "/proj", HOME)).toBe(true);
+  });
+});

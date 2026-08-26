@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.1.0] - 2026-08-26
+
+### Added
+
+- **PowerShell tool support (fine-grained)**: the optional `powershell` tool added in pi 0.84.3 (Windows-only, opt-in via `defaultTools`/SDK) is now covered by the same R/W/X + danger-overlay decision pipeline as bash, instead of falling through to the tool-level path check where its `command`-only input silently hit FR-5 allow in build mode. Includes: alias normalization (`gci`/`rm`/`curl` → canonical cmdlets), read/write/dangerous cmdlet registries with named-parameter path extraction (`-Path`/`-LiteralPath`/`-Destination`…), fixed danger forms (`iex`, `icm`, `Set-ExecutionPolicy`, nested `pwsh`/`powershell`, call operator `&`, dot-sourcing, script blocks, `Remove-Item -Recurse/-Force`, `irm | iex` pipe-to-shell), `$()` subexpression / bare grouping / splatting / here-string fail-closed, and native exe fallback to the bash registries (git subcommand logic reused). New config keys `readonlyPowerShellCommands` and `dangerousPowerShellCommands` (same union merge semantics as the bash arrays).
+- **Windows-style absolute paths are always outside the project domain** (`isWithinCwd`): drive-letter (`C:\...`) and UNC (`\\server\...`) paths no longer rely on platform path resolution — POSIX resolve used to treat them as relative and wrongly grant in-domain access when running off-Windows.
+
+### Hardened (post-review)
+
+- **C1**: `Push-Location`/`Pop-Location` are now tracked by segment cwd resolution — `Push-Location <dir>` switches the tracked cwd, no-arg push keeps it (stack-only), and `Pop-Location` marks subsequent relative paths as untrackable (conservatively treated as out-of-domain). Previously `Push-Location D:\outside; New-Item x` silently allowed an out-of-domain write in build mode.
+- **M1**: single-letter short flags `-r`/`-f` on `Remove-Item` (incl. aliases `rm`/`ri`/`del`) now hit the fixed danger overlay, matching bash's `rm -r/-f` handling.
+- **M2**: a standalone `&` after a completed statement splits segments (background-job marker), so `Get-Date & Remove-Item x` no longer hides the second statement inside the first segment's args; a leading `&` is still recognized as the call operator.
+- **P2**: FR-10 session approval keys are tool-name-scoped (a powershell executor approval no longer pre-approves bash, and vice versa); braces inside quotes no longer trigger the script-block danger; `Rename-Item -NewName` participates in write-target collection; malformed non-string powershell input fails closed (ask) instead of falling through to allow; `expandHome` accepts `~\` form and sensitive-path matching gains backslash-normalized candidates.
+
 ## [1.0.2] - 2026-08-24
 
 ### Fixed

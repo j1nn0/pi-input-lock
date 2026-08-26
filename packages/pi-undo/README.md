@@ -2,11 +2,12 @@
 
 **English** | [中文](./README.zh-CN.md)
 
-Undo for Pi coding agent: restore the last sent prompt to the editor and remove it from the conversation, single-per-turn, queue-aware, abort-then-undo.
+Undo for Pi coding agent: restore the last sent prompt to the editor and remove it from the conversation, single-per-turn, abort-then-undo.
 
-- **Undo**: removes the last `user` turn and restores it to the editor, recoverable via `/tree`; file side-effects are NOT reverted
-- **Queue-aware, single per turn**: `a sent + b,c queued` → `undo` pops `c` to editor once; the next `undo` goes to history. One undo per turn, reset on next `before_agent_start`; draft checked atomically before abort
-- **Abort-then-undo**: if streaming, `abort()` then `waitForIdle()` before revert, re-checks draft
+- **Undo**: removes the last `user` turn and its entire assistant response (complete or partial) and restores it to the editor, recoverable via `/tree`; file side-effects are NOT reverted
+- **Single per turn**: one undo per turn, reset on next `before_agent_start`; draft checked atomically before revert
+- **Abort-then-undo**: if streaming, `abort()` then `waitForIdle()` before reverting the just-sent message
+- **Queue non-empty = official dequeue (alt+up)**: recalls all queued text to the editor and clears steer/followUp queues **without interrupting the current turn**, session untouched. Implemented by capturing the TUI reference via a zero-height widget and directly invoking the host `CustomEditor`'s registered `app.message.dequeue` handler (the same function object bound for alt+up); falls back to a notify hint if unreachable
 
 ## Installation
 
@@ -29,9 +30,11 @@ pi -ne -e ./packages/pi-undo
 - `alt+u` — same as `/undo`.
 
 Behavior:
-- If editor has draft, notifies `Editor has draft, clear it first` and does not overwrite (atomic, no abort).
-- If `a` sent and `b,c` queued, `undo` restores `c` once; the remaining `b` stays queued in the mirror (true queue may still contain `c`; use `Esc` if needed — see Limitations).
-- If streaming, directly aborts then reverts, re-checks draft after wait.
+- If editor is non-empty, notifies `Editor has draft, clear it first` and does not undo. This guard has the highest priority and applies to every branch — including after an abort, when a misbehaving host may have restored queued text into the editor (it counts as a draft).
+- Streaming with non-empty queue: equivalent to official dequeue — all queued text restored to the editor, queues cleared, current turn keeps running, session untouched (same effect as pressing alt+up).
+- Streaming with empty queue: aborts then reverts the just-sent user message.
+- Idle: reverts the last user message.
+- If the host editor cannot be reached (version drift / non-TUI mode): notifies to use the dequeue shortcut (`alt+up`; `alt+q` on Windows).
 - No redo: recover via `/tree`.
 
 ## Configuration
@@ -50,7 +53,7 @@ Default `alt+u`. When trusted, project config at `.pi/extensions/pi-undo/config.
 
 - Reverts page immediately and persists across `--session`; first message via `resetLeaf`.
 - File side-effects NOT reverted (edits/writes/bash); undo only reverts conversation branch.
-- Queue undo is mirror-based (captures `input` with `streamingBehavior=steer|followUp`, capped at 20). True queue pop requires kernel `getPendingMessages` — queued `c` may still be pending; use `Esc` to clear if needed.
+- Queue recall relies on the host's `CustomEditor.actionHandlers` internal structure (undocumented API): if a pi upgrade changes it, the extension degrades gracefully to an alt+up hint. No programmatic dequeue API exists upstream.
 
 ## Development
 

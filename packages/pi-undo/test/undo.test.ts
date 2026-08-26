@@ -1,84 +1,29 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-// 保留原有状态机单测（验证 mirror/canUndo 基础逻辑）
+// 状态机单测（canUndo 单次/轮逻辑）
 describe("undo state machine (unit)", () => {
   const sid = "sid-1";
   let canUndoBySid: Map<string, boolean>;
-  let mirrorBySid: Map<string, string[]>;
 
   const getCanUndo = (sid: string) => (canUndoBySid.has(sid) ? canUndoBySid.get(sid)! : true);
   const setCanUndo = (sid: string, v: boolean) => canUndoBySid.set(sid, v);
-  const getMirror = (sid: string) => {
-    let a = mirrorBySid.get(sid);
-    if (!a) { a = []; mirrorBySid.set(sid, a); }
-    return a;
-  };
-
-  const onInput = (text: string, beh: string | undefined) => {
-    if (beh === "steer" || beh === "followUp") {
-      const t = text?.trim() ?? "";
-      if (t !== "" && !t.startsWith("/undo")) {
-        const m = getMirror(sid);
-        m.push(t);
-        if (m.length > 20) m.shift();
-      }
-    }
-  };
-  const onBeforeAgentStart = (prompt: string) => {
-    setCanUndo(sid, true);
-    const m = getMirror(sid);
-    const promptTrim = prompt.trim();
-    const idx = m.indexOf(promptTrim);
-    if (idx !== -1) m.splice(idx, 1);
-    else if (m[0] === promptTrim) m.shift();
-  };
 
   beforeEach(() => {
     canUndoBySid = new Map();
-    mirrorBySid = new Map();
   });
 
   it("before_agent_start resets canUndo", () => {
     setCanUndo(sid, false);
-    onBeforeAgentStart("hello");
+    setCanUndo(sid, true);
     expect(getCanUndo(sid)).toBe(true);
-  });
-
-  it("mirror collects only steer/followUp", () => {
-    onInput("a", undefined);
-    expect(getMirror(sid).length).toBe(0);
-    onInput("b", "steer");
-    onInput("c", "followUp");
-    expect(getMirror(sid)).toEqual(["b", "c"]);
-  });
-
-  it("mirror limit 20", () => {
-    for (let i = 0; i < 25; i++) onInput(`m${i}`, "steer");
-    expect(getMirror(sid).length).toBe(20);
-    expect(getMirror(sid)[0]).toBe("m5");
-  });
-
-  it("before_agent_start removes dequeued prompt from mirror", () => {
-    onInput("b", "steer");
-    onInput("c", "steer");
-    onBeforeAgentStart("b");
-    expect(getMirror(sid)).toEqual(["c"]);
   });
 
   it("single per turn: undo sets false, second blocked until next before_agent_start", () => {
     expect(getCanUndo(sid)).toBe(true);
     setCanUndo(sid, false);
     expect(getCanUndo(sid)).toBe(false);
-    onBeforeAgentStart("next");
+    setCanUndo(sid, true);
     expect(getCanUndo(sid)).toBe(true);
-  });
-
-  it("queue single: pop tail once", () => {
-    onInput("b", "steer");
-    onInput("c", "steer");
-    const popped = getMirror(sid).pop();
-    expect(popped).toBe("c");
-    expect(getMirror(sid)).toEqual(["b"]);
   });
 
   it("soft/hard branch text extraction", async () => {
@@ -90,6 +35,11 @@ describe("undo state machine (unit)", () => {
 
 // 集成测试：通过 mock pi 真实驱动 src/index.ts 的 doUndo
 describe("doUndo integration (via mock pi)", () => {
+  // 每个用例重新加载模块：doUndo 依赖模块级 capturedTui 状态，避免用例间串扰
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
   // 辅助：创建 mock pi，捕获注册的 handler
   function createMockPi() {
     const handlers: Record<string, (event: unknown, ctx: unknown) => Promise<unknown>> = {};
@@ -127,10 +77,10 @@ describe("doUndo integration (via mock pi)", () => {
         setEditorText: vi.fn(),
         setStatus: vi.fn(),
         notify: vi.fn(),
+        setWidget: vi.fn(),
       },
       isIdle: vi.fn(() => true),
       abort: vi.fn(),
-      // ExtensionCommandContext 额外能力
       navigateTree: vi.fn(async () => {}),
       waitForIdle: vi.fn(async () => {}),
       ...overrides,
@@ -193,41 +143,240 @@ describe("doUndo integration (via mock pi)", () => {
     expect(ctx.navigateTree).toHaveBeenCalledWith("1", { summarize: false });
   });
 
-  it("队列镜像：pop tail 单次，第二次转 Already undone", async () => {
+  it("异常宿主 abort 回灌文本：守卫优先级最高，按草稿拦截且不硬撤", async () => {
+    const { mockPi, commandHandlers } = createMockPi();
+    const mod = await import("../src/index.ts");
+    (mod.default as any)(mockPi);
+    const branch = [
+      branchWithUser("B1", null, "earlier"),
+      branchWithUser("A", "B1", "just-sent"),
+      { type: "message", id: "partial", parentId: "A", timestamp: new Date().toISOString(), message: { role: "assistant", content: "working..." } },
+    ];
+    let idle = false;
+    let leafId: string | null = "partial";
+    const ctx = createMockCtx({
+      sessionManager: {
+        getSessionId: vi.fn(() => "sid-defensive"),
+        getBranch: vi.fn(() => branch),
+        getLeafId: vi.fn(() => leafId),
+        branch: vi.fn(),
+        resetLeaf: vi.fn(),
+      },
+      isIdle: vi.fn(() => idle),
+      waitForIdle: vi.fn(async () => { idle = true; }),
+      navigateTree: vi.fn(async (_id: string) => { leafId = "B1"; return {}; }),
+      hasPendingMessages: vi.fn(() => false),
+    });
+    // 模拟异常宿主：hasPending 为 false 但 abort 时仍回灌了文本进编辑器
+    ctx.abort = vi.fn(() => {
+      ctx.ui.getEditorText.mockReturnValue("b\n\nc");
+    });
+    await commandHandlers["undo"]!({}, ctx);
+    // 回灌文本视为草稿：提示并直接返回——不硬撤、不合并回填、不落哨兵
+    expect(ctx.abort).toHaveBeenCalled();
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Editor has draft, clear it first", "warning");
+    expect(ctx.navigateTree).not.toHaveBeenCalled();
+    expect(ctx.ui.setEditorText).not.toHaveBeenCalled();
+    expect(mockPi.appendEntry).not.toHaveBeenCalled();
+
+    // 未消耗单次/轮：清空草稿后可重试并正常硬撤
+    ctx.ui.getEditorText.mockReturnValue("");
+    await commandHandlers["undo"]!({}, ctx);
+    expect(ctx.navigateTree).toHaveBeenCalledWith("A", { summarize: false });
+    expect(ctx.ui.setEditorText).toHaveBeenCalledWith("just-sent");
+  });
+
+  it("执行中且队列非空：直调官方 dequeue handler（不 abort、不动会话、无提示）", async () => {
     const { mockPi, commandHandlers, handlers } = createMockPi();
     const mod = await import("../src/index.ts");
     (mod.default as any)(mockPi);
-    const ctx = createMockCtx({ hasUI: true });
+    // 模拟宿主 CustomEditor：actionHandlers 注册官方 dequeue
+    const dequeueHandler = vi.fn();
+    const fakeTui = {
+      children: [
+        { children: [{ actionHandlers: new Map([["app.message.dequeue", dequeueHandler]]) }] },
+      ],
+    };
+    const ctx = createMockCtx({
+      isIdle: vi.fn(() => false),
+      abort: vi.fn(),
+      navigateTree: vi.fn(async () => {}),
+      hasPendingMessages: vi.fn(() => true),
+      mode: "tui",
+    });
+    // session_start 触发 widget 注册，用假 tui 调工厂完成捕获
+    await handlers["session_start"]!({}, ctx);
+    const setWidgetCall = ctx.ui.setWidget.mock.calls[0];
+    expect(setWidgetCall?.[0]).toBe("pi-undo-tui-capture");
+    const componentFactory = setWidgetCall?.[1] as (tui: unknown) => unknown;
+    componentFactory(fakeTui);
 
-    // 模拟 input 队列 b,c
-    const inputHandler = handlers["input"]!;
-    await inputHandler({ text: "b", streamingBehavior: "steer" }, ctx);
-    await inputHandler({ text: "c", streamingBehavior: "steer" }, ctx);
-
-    // 第一次 undo 弹 c
     await commandHandlers["undo"]!({}, ctx);
-    expect(ctx.ui.setEditorText).toHaveBeenCalledWith("c");
-
-    // 第二次应被单次/轮拦截，不再弹 b
-    ctx.ui.notify.mockClear();
-    ctx.ui.setEditorText.mockClear();
-    await commandHandlers["undo"]!({}, ctx);
-    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Already undone"), "warning");
+    // 直调官方 dequeue：当前轮继续运行，扩展侧不再额外动作、不提示
+    expect(dequeueHandler).toHaveBeenCalledTimes(1);
+    expect(ctx.abort).not.toHaveBeenCalled();
+    expect(ctx.waitForIdle).not.toHaveBeenCalled();
+    expect(ctx.navigateTree).not.toHaveBeenCalled();
     expect(ctx.ui.setEditorText).not.toHaveBeenCalled();
+    expect(ctx.ui.notify).not.toHaveBeenCalled();
   });
 
-  it("before_agent_start 重置 canUndo 并清理已投递的 mirror 项", async () => {
+  it("执行中且队列非空但 TUI 引用缺失：提示按 dequeue 快捷键，不 abort", async () => {
+    const { mockPi, commandHandlers } = createMockPi();
+    const mod = await import("../src/index.ts");
+    (mod.default as any)(mockPi);
+    const ctx = createMockCtx({
+      isIdle: vi.fn(() => false),
+      abort: vi.fn(),
+      navigateTree: vi.fn(async () => {}),
+      hasPendingMessages: vi.fn(() => true),
+    });
+    await commandHandlers["undo"]!({}, ctx);
+    expect(ctx.abort).not.toHaveBeenCalled();
+    expect(ctx.navigateTree).not.toHaveBeenCalled();
+    expect(ctx.ui.setEditorText).not.toHaveBeenCalled();
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("Cannot reach host editor"),
+      "warning",
+    );
+  });
+
+  it("dequeue handler 抛错：提示 Failed to recall queued messages", async () => {
+    const { mockPi, commandHandlers, handlers } = createMockPi();
+    const mod = await import("../src/index.ts");
+    (mod.default as any)(mockPi);
+    const dequeueHandler = vi.fn(() => { throw new Error("boom"); });
+    const fakeTui = { children: [{ actionHandlers: new Map([["app.message.dequeue", dequeueHandler]]) }] };
+    const ctx = createMockCtx({
+      isIdle: vi.fn(() => false),
+      abort: vi.fn(),
+      hasPendingMessages: vi.fn(() => true),
+      mode: "tui",
+    });
+    await handlers["session_start"]!({}, ctx);
+    (ctx.ui.setWidget.mock.calls[0]?.[1] as (tui: unknown) => unknown)(fakeTui);
+    await commandHandlers["undo"]!({}, ctx);
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("Failed to recall queued messages"),
+      "warning",
+    );
+  });
+
+  it("draft 守卫优先于队列分支：有草稿+有队列只出草稿提示、不调 handler", async () => {
+    const { mockPi, commandHandlers, handlers } = createMockPi();
+    const mod = await import("../src/index.ts");
+    (mod.default as any)(mockPi);
+    const dequeueHandler = vi.fn();
+    const fakeTui = { children: [{ actionHandlers: new Map([["app.message.dequeue", dequeueHandler]]) }] };
+    const ctx = createMockCtx({
+      isIdle: vi.fn(() => false),
+      abort: vi.fn(),
+      hasPendingMessages: vi.fn(() => true),
+      mode: "tui",
+      ui: {
+        getEditorText: vi.fn(() => "pending draft"),
+        setEditorText: vi.fn(),
+        setStatus: vi.fn(),
+        notify: vi.fn(),
+        setWidget: vi.fn(),
+      },
+    });
+    await handlers["session_start"]!({}, ctx);
+    (ctx.ui.setWidget.mock.calls[0]?.[1] as (tui: unknown) => unknown)(fakeTui);
+    await commandHandlers["undo"]!({}, ctx);
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      "Editor has draft, clear it first",
+      "warning",
+    );
+    expect(dequeueHandler).not.toHaveBeenCalled();
+    expect(ctx.abort).not.toHaveBeenCalled();
+  });
+
+  it("widget 已注册但树形漂移（找不到编辑器）：回退提示而非崩溃", async () => {
+    const { mockPi, commandHandlers, handlers } = createMockPi();
+    const mod = await import("../src/index.ts");
+    (mod.default as any)(mockPi);
+    const ctx = createMockCtx({
+      isIdle: vi.fn(() => false),
+      abort: vi.fn(),
+      hasPendingMessages: vi.fn(() => true),
+      mode: "tui",
+    });
+    await handlers["session_start"]!({}, ctx);
+    // 捕获了一个没有编辑器的假 tui（模拟宿主结构变化）
+    (ctx.ui.setWidget.mock.calls[0]?.[1] as (tui: unknown) => unknown)({ children: [] });
+    await commandHandlers["undo"]!({}, ctx);
+    expect(ctx.abort).not.toHaveBeenCalled();
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("Cannot reach host editor"),
+      "warning",
+    );
+  });
+
+  it("dequeue 路径不消耗单次/轮预算：连续两次都生效", async () => {
+    const { mockPi, commandHandlers, handlers } = createMockPi();
+    const mod = await import("../src/index.ts");
+    (mod.default as any)(mockPi);
+    const dequeueHandler = vi.fn();
+    const fakeTui = { children: [{ actionHandlers: new Map([["app.message.dequeue", dequeueHandler]]) }] };
+    const ctx = createMockCtx({
+      isIdle: vi.fn(() => false),
+      abort: vi.fn(),
+      hasPendingMessages: vi.fn(() => true),
+      mode: "tui",
+    });
+    await handlers["session_start"]!({}, ctx);
+    (ctx.ui.setWidget.mock.calls[0]?.[1] as (tui: unknown) => unknown)(fakeTui);
+    await commandHandlers["undo"]!({}, ctx);
+    await commandHandlers["undo"]!({}, ctx);
+    expect(dequeueHandler).toHaveBeenCalledTimes(2);
+    expect(ctx.ui.notify).not.toHaveBeenCalledWith(
+      expect.stringContaining("Already undone"),
+      "warning",
+    );
+  });
+
+  it("执行中无排队消息时，撤回后编辑器仅回填被撤消息文本", async () => {
+    const { mockPi, commandHandlers } = createMockPi();
+    const mod = await import("../src/index.ts");
+    (mod.default as any)(mockPi);
+    const branch = [
+      branchWithUser("1", null, "first"),
+      { type: "message", id: "2", parentId: "1", timestamp: new Date().toISOString(), message: { role: "assistant", content: "hi" } },
+      branchWithUser("3", "2", "msg"),
+    ];
+    let idle = false;
+    let leafId: string | null = "3";
+    const ctx = createMockCtx({
+      sessionManager: {
+        getSessionId: vi.fn(() => "sid-working-clean"),
+        getBranch: vi.fn(() => branch),
+        getLeafId: vi.fn(() => leafId),
+        branch: vi.fn(),
+        resetLeaf: vi.fn(),
+      },
+      isIdle: vi.fn(() => idle),
+      abort: vi.fn(),
+      waitForIdle: vi.fn(async () => { idle = true; }),
+      // 模拟宿主对 user 目标的特判：newLeafId = parentId
+      navigateTree: vi.fn(async (_id: string) => { leafId = "2"; return {}; }),
+    });
+    await commandHandlers["undo"]!({}, ctx);
+    // leaf 恰为被撤消息时命中宿主 no-op 早退陷阱，应改以 parent 为目标
+    expect(ctx.navigateTree).toHaveBeenCalledWith("2", { summarize: false });
+    expect(ctx.ui.setEditorText).toHaveBeenCalledWith("msg");
+  });
+
+  it("before_agent_start 重置 canUndo，重置后可再次撤销", async () => {
     const { mockPi, commandHandlers, handlers } = createMockPi();
     const mod = await import("../src/index.ts");
     (mod.default as any)(mockPi);
     const ctx = createMockCtx({});
-    const inputHandler = handlers["input"]!;
-    await inputHandler({ text: "b", streamingBehavior: "steer" }, ctx);
-    await inputHandler({ text: "c", streamingBehavior: "followUp" }, ctx);
 
     // 先消耗一次
+    ctx.sessionManager.getBranch.mockReturnValue([branchWithUser("1", null, "history-msg")]);
     await commandHandlers["undo"]!({}, ctx);
-    expect(ctx.ui.setEditorText).toHaveBeenCalledWith("c");
+    expect(ctx.navigateTree).toHaveBeenCalledWith("1", { summarize: false });
 
     // 第二次被拦
     await commandHandlers["undo"]!({}, ctx);
@@ -235,15 +384,13 @@ describe("doUndo integration (via mock pi)", () => {
 
     // before_agent_start 重置
     const beforeHandler = handlers["before_agent_start"]!;
-    await beforeHandler({ prompt: "b" }, ctx);
+    await beforeHandler({ prompt: "next" }, ctx);
 
-    // 重置后应可再次撤销（此时 mirror 剩余 b 已被清理，应走历史导航）
+    // 重置后应可再次撤销
     ctx.ui.notify.mockClear();
-    ctx.ui.setEditorText.mockClear();
-    ctx.sessionManager.getBranch.mockReturnValue([branchWithUser("1", null, "history-msg")]);
+    ctx.sessionManager.getBranch.mockReturnValue([branchWithUser("2", null, "another")]);
     await commandHandlers["undo"]!({}, ctx);
-    // 由于 mirror 已被 before_agent_start 清理（b 被移除），应走 navigateTree(entryId)
-    expect(ctx.navigateTree).toHaveBeenCalledWith("1", { summarize: false });
+    expect(ctx.navigateTree).toHaveBeenCalledWith("2", { summarize: false });
   });
 
   it("历史撤销：navigateTree 使用 entryId 并落哨兵", async () => {
@@ -438,22 +585,27 @@ describe("doUndo integration (via mock pi)", () => {
   });
 
   it("并发二次 undo 仅一次成功（B4）", async () => {
-    const { mockPi, commandHandlers, handlers } = createMockPi();
+    const { mockPi, commandHandlers } = createMockPi();
     const mod = await import("../src/index.ts");
     (mod.default as any)(mockPi);
-    const ctx = createMockCtx({});
-    // 注入 mirror
-    const inputHandler = handlers["input"]!;
-    await inputHandler({ text: "b", streamingBehavior: "steer" }, ctx);
-    await inputHandler({ text: "c", streamingBehavior: "steer" }, ctx);
+    const branch = [branchWithUser("1", null, "msg3")];
+    const ctx = createMockCtx({
+      sessionManager: {
+        getSessionId: vi.fn(() => "sid-concurrent"),
+        getBranch: vi.fn(() => branch),
+        branch: vi.fn(),
+        resetLeaf: vi.fn(),
+      },
+      navigateTree: vi.fn(async () => {}),
+    });
 
     // 并发两次
     const p1 = commandHandlers["undo"]!({}, ctx);
     const p2 = commandHandlers["undo"]!({}, ctx);
     await Promise.all([p1, p2]);
-    // 只有一个 setEditorText("c")，另一个被 Already undone / already in progress 拦截
-    const calls = ctx.ui.setEditorText.mock.calls.map((c: unknown[]) => c[0]);
-    expect(calls.filter((x: string) => x === "c").length).toBe(1);
+    // 只有一次真实导航成功，另一个被 Already undone / already in progress 拦截
+    const navCalls = ctx.navigateTree.mock.calls.length;
+    expect(navCalls).toBe(1);
     expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/Already undone|already in progress/i), "warning");
   });
 
@@ -472,24 +624,6 @@ describe("doUndo integration (via mock pi)", () => {
     await expect(commandHandlers["undo"]!({}, ctx)).resolves.not.toThrow();
   });
 
-  it("input 仅收集 steer/followUp 且 trim 后入队", async () => {
-    const { mockPi, handlers } = createMockPi();
-    const mod = await import("../src/index.ts");
-    (mod.default as any)(mockPi);
-    const ctx = createMockCtx({});
-    await handlers["input"]!({ text: "  ", streamingBehavior: "steer" }, ctx);
-    await handlers["input"]!({ text: "a", streamingBehavior: undefined }, ctx);
-    await handlers["input"]!({ text: "  hello  ", streamingBehavior: "followUp" }, ctx);
-    await handlers["input"]!({ text: "/undo", streamingBehavior: "steer" }, ctx);
-    // 触发一次 undo 应弹 hello 的 trim 版
-    const undoHandler = (await import("../src/index.ts")).default;
-    // 直接通过 commandHandler 验证 mirror 行为：第二次入队后再 undo
-    // 已通过 hello 的 setEditorText 间接验证
-    void createMockPi;
-    // 简化：验证 mirror 存储为 trim
-    // 已通过上面 hello 的 setEditorText 间接验证
-    expect(true).toBe(true);
-  });
 
   it("alt+u 快捷键委托 /undo 命令管道，行为一致性由构造保证", async () => {
     const { mockPi } = createMockPi();

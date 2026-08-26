@@ -1,6 +1,9 @@
 /**
  * @inobit/pi-undo — 撤销：把最近一次发送的输入撤回到输入框并从对话中移除
- * 单次/轮，队列感知，原子 abort，快捷键 alt+u（委托 /undo 命令管道）
+ * 单次/轮，原子 abort，快捷键 alt+u（委托 /undo 命令管道）
+ *
+ * 队列非空（执行中）：等价官方 dequeue（alt+up）——取回全部排队文本到编辑器、
+ * 清空 steer/followUp 队列，不中断当前轮；实现见 capturedTui/findCustomEditor。
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -48,18 +51,56 @@ async function waitUntilIdle(ctx: ExtensionContext): Promise<void> {
   }
 }
 
+/**
+ * 宿主 TUI 引用与 CustomEditor 定位（队列取回专用）。
+ *
+ * 背景：官方 dequeue（alt+up）绑定在 TUI 内部的 CustomEditor 上
+ * （editor.onAction("app.message.dequeue", ...)），扩展 API 没有编程式入口。
+ * 这里通过 setWidget 的组件工厂拿到 TUI 引用，撤销时在组件树中找到
+ * CustomEditor 并直接调用其 actionHandlers 里的 dequeue handler——
+ * 与按下 alt+up 执行的是同一个函数对象，语义逐字节一致。
+ */
+const capturedTui: { current: unknown } = { current: undefined };
+
+interface EditorLike {
+  actionHandlers?: Map<string, () => void>;
+}
+
+/** 从 TUI 组件树递归查找带 actionHandlers 的 CustomEditor */
+function findCustomEditor(node: unknown, depth = 0): EditorLike | undefined {
+  if (!node || typeof node !== "object" || depth > 6) return undefined;
+  const n = node as Record<string, unknown>;
+  if (n.actionHandlers instanceof Map) return n as EditorLike;
+  const children = n.children;
+  if (Array.isArray(children)) {
+    for (const child of children) {
+      const found = findCustomEditor(child, depth + 1);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
+/** 注册零高 widget 以捕获 TUI 引用（render 返回空数组，不影响布局） */
+function registerTuiCapture(ctx: ExtensionContext): void {
+  try {
+    ctx.ui.setWidget("pi-undo-tui-capture", (tui: unknown) => {
+      capturedTui.current = tui;
+      return {
+        render: (_width: number): string[] => [],
+        invalidate: (): void => {},
+        dispose: (): void => {},
+      };
+    });
+  } catch {}
+}
+
 export default function (pi: ExtensionAPI) {
   const canUndoBySid = new Map<SessionId, boolean>();
-  const mirrorBySid = new Map<SessionId, string[]>();
   const pendingBySid = new Set<SessionId>();
 
   const getCanUndo = (sid: SessionId): boolean => (canUndoBySid.has(sid) ? canUndoBySid.get(sid)! : true);
   const setCanUndo = (sid: SessionId, v: boolean): void => { canUndoBySid.set(sid, v); };
-  const getMirror = (sid: SessionId): string[] => {
-    let a = mirrorBySid.get(sid);
-    if (!a) { a = []; mirrorBySid.set(sid, a); }
-    return a;
-  };
 
   const doUndo = async (ctx: ExtensionContext): Promise<void> => {
     if (!ctx.hasUI) return;
@@ -84,19 +125,10 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    const mirror = getMirror(sid);
-    if (mirror.length > 0) {
-      // 单次/轮预占，避免并发二次 pop
-      setCanUndo(sid, false);
-      const popped = mirror.pop();
-      if (popped === undefined) return;
-      try { ctx.ui.setEditorText(popped); } catch {}
-      // 强刷一次，确保 TUI 立即刷新
-      try { ctx.ui.setStatus("pi-undo", " "); ctx.ui.setStatus("pi-undo", undefined); } catch {}
-      return;
-    }
-
-    // 历史撤销路径：加互斥，防止并发绕过单次/轮
+    // 撤销路径：加互斥，防止并发绕过单次/轮。
+    // 注意：不做镜像软撤——扩展拿不到宿主队列内容，pop 副本无法真正移除排队的
+    // steer/followUp 消息，只会造成「假撤回」。队列非空时走官方 dequeue 直调
+    // （见下方 hasPending 分支）；队列空时执行中 abort 后硬撤刚发的 user 消息。
     pendingBySid.add(sid);
     try {
       const isIdleFn = typeof (ctx as unknown as { isIdle?: () => boolean }).isIdle === "function"
@@ -106,6 +138,30 @@ export default function (pi: ExtensionAPI) {
         ? () => (ctx as unknown as { abort: () => void }).abort()
         : () => {};
 
+      // 队列非空时等价于官方 dequeue（alt+up）：取回全部排队文本到编辑器并清空
+      // steer/followUp 队列，不中断当前轮、不动会话树。通过 TUI 引用直达
+      // CustomEditor.actionHandlers 中注册的官方 handler，避免模拟按键序列。
+      try {
+        const hasPendingFn = (ctx as unknown as { hasPendingMessages?: () => boolean }).hasPendingMessages;
+        if (typeof hasPendingFn === "function" && hasPendingFn.call(ctx)) {
+          const tui = capturedTui.current;
+          const editor = tui ? findCustomEditor(tui) : undefined;
+          const dequeueHandler =
+            editor?.actionHandlers instanceof Map
+              ? editor.actionHandlers.get("app.message.dequeue")
+              : undefined;
+          if (typeof dequeueHandler === "function") {
+            try { dequeueHandler(); } catch (e) {
+              safeNotify(`Failed to recall queued messages: ${e instanceof Error ? e.message : String(e)}`, "warning");
+            }
+          } else {
+            // TUI 引用缺失或宿主结构变化（版本漂移）：提示用户手动按 dequeue 快捷键
+            safeNotify("Cannot reach host editor — press the dequeue shortcut (alt+up; alt+q on Windows) to recall queued messages", "warning");
+          }
+          return;
+        }
+      } catch {}
+
       if (!isIdleFn()) {
         try { abortFn(); } catch {}
         await waitUntilIdle(ctx);
@@ -113,6 +169,9 @@ export default function (pi: ExtensionAPI) {
           safeNotify("Abort did not settle, try again", "warning");
           return;
         }
+        // 草稿守卫优先级最高、适用于所有分支：abort 后编辑器非空（含异常宿主把
+        // 排队消息回灌进编辑器的情况）一律视为草稿——提示后直接返回，不硬撤、
+        // 不合并回填；未消耗单次/轮，用户清空草稿后可重试。
         let d2 = "";
         try { d2 = ctx.ui.getEditorText() ?? ""; } catch {}
         if (d2.trim() !== "") {
@@ -128,6 +187,11 @@ export default function (pi: ExtensionAPI) {
         safeNotify("No message to undo", "warning");
         return;
       }
+
+      // 回填编辑器：仅写回被撤消息文本（草稿守卫已在上方拦截一切非空场景）
+      const fillEditorWithUndoText = (): void => {
+        try { ctx.ui.setEditorText(found.text); } catch {}
+      };
 
       const anyCtx = ctx as unknown as Record<string, unknown>;
       const sm = ctx.sessionManager as unknown as Record<string, unknown>;
@@ -170,7 +234,7 @@ export default function (pi: ExtensionAPI) {
             if (typeof sm.resetLeaf !== "function") throw new Error("No hard revert capability");
             (sm.resetLeaf as () => void)();
             appendPinSafely();
-            try { ctx.ui.setEditorText(found.text); } catch {}
+            fillEditorWithUndoText();
             try { ctx.ui.setStatus("pi-undo", " "); ctx.ui.setStatus("pi-undo", undefined); } catch {}
             setCanUndo(sid, false);
             safeNotify("Undone on disk. In-memory view not refreshed — restart or /new to apply.", "warning");
@@ -195,14 +259,15 @@ export default function (pi: ExtensionAPI) {
           return;
         }
 
-        // navigateTree 已在内部 setEditorText（当编辑器空时），再补一次确保
-        try { ctx.ui.setEditorText(found.text); } catch {}
+        // navigateTree 已在内部 setEditorText（当编辑器空时）；此处显式回填，
+        // 并保留宿主 abort 时回灌的排队文本
+        fillEditorWithUndoText();
         try { ctx.ui.setStatus("pi-undo", " "); ctx.ui.setStatus("pi-undo", undefined); } catch {}
         appendPinSafely();
         setCanUndo(sid, false);
         return;
       } catch (e) {
-        try { ctx.ui.setEditorText(found.text); } catch {}
+        fillEditorWithUndoText();
         setCanUndo(sid, false);
         safeNotify(`Hard undo failed: ${e instanceof Error ? e.message : String(e)}`, "warning");
         return;
@@ -212,45 +277,18 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
-  pi.on("input", async (event, ctx) => {
-    const sid = sessionIdOf(ctx);
-    const beh = (event as unknown as { streamingBehavior?: string }).streamingBehavior;
-    if (beh === "steer" || beh === "followUp") {
-      const t = event.text?.trim() ?? "";
-      if (t !== "" && !(t === "/undo" || t.startsWith("/undo ") || t.startsWith("/undo\t"))) {
-        const m = getMirror(sid);
-        m.push(t);
-        if (m.length > 20) m.shift();
-      }
-    }
-    return { action: "continue" as const };
-  });
-
-  pi.on("before_agent_start", async (event, ctx) => {
-    const sid = sessionIdOf(ctx);
-    setCanUndo(sid, true);
-    const m = getMirror(sid);
-    if (m.length > 0 && event.prompt !== undefined) {
-      const promptTrim = typeof event.prompt === "string" ? event.prompt.trim() : String(event.prompt).trim();
-      if (promptTrim !== "") {
-        if (m[0] === promptTrim) m.shift();
-        else {
-          const idx = m.indexOf(promptTrim);
-          if (idx !== -1) m.splice(idx, 1);
-        }
-      }
-    }
+  pi.on("before_agent_start", async (_e, ctx) => {
+    setCanUndo(sessionIdOf(ctx), true);
   });
 
   pi.on("session_start", async (_e, ctx) => {
     const sid = sessionIdOf(ctx);
     setCanUndo(sid, true);
-    mirrorBySid.set(sid, []);
     pendingBySid.delete(sid);
+    if (ctx.hasUI && ctx.mode === "tui") registerTuiCapture(ctx);
   });
   pi.on("session_shutdown", async (_e, ctx) => {
     const sid = sessionIdOf(ctx);
-    mirrorBySid.delete(sid);
     canUndoBySid.delete(sid);
     pendingBySid.delete(sid);
   });
@@ -263,7 +301,7 @@ export default function (pi: ExtensionAPI) {
   } catch {}
 
   pi.registerCommand("undo", {
-    description: `Undo last prompt to editor (hard revert, single per turn, queue-aware). Shortcut: ${shortcut}`,
+    description: `Undo last prompt to editor (hard revert, single per turn; recalls queued messages first). Shortcut: ${shortcut}`,
     handler: async (_a, ctx) => { await doUndo(ctx); },
   });
 

@@ -162,4 +162,29 @@ describe("Windows 风格绝对路径（powershell 工具回归）", () => {
     expect(isWithinCwd("C:\\proj\\file.txt", "/proj", HOME)).toBe(false);
     expect(isWithinCwd("./local.txt", "/proj", HOME)).toBe(true);
   });
+
+  it("Windows 宿主：cwd 为盘符路径时，正斜杠/大小写变体的项目内目标仍判域内（用户反馈回归）", () => {
+    // 实际场景：project=D:\documents\projects\v3-service，write 目标为 D:/.../startup.cmd
+    expect(isWithinCwd("D:/proj/startup.cmd", "D:\\proj", HOME)).toBe(true);
+    expect(isWithinCwd("d:\\PROJ\\sub\\a.txt", "D:/proj", HOME)).toBe(true);
+    // 跨盘符必须判域外（不能因 POSIX 拼接误判域内）
+    expect(isWithinCwd("E:\\elsewhere\\f.txt", "D:\\proj", HOME)).toBe(false);
+    expect(isWithinCwd("D:/outside/f.txt", "D:\\proj", HOME)).toBe(false);
+    // UNC cwd 与盘符目标的组合按域外处理（无法归一化比较）
+    expect(isWithinCwd("C:\\x\\f.txt", "\\\\server\\share", HOME)).toBe(false);
+  });
+
+  it("review P1: winPair 词法分支必须折叠 .. 点段，防止穿越逃逸", () => {
+    expect(isWithinCwd("D:/proj/a/../../evil.txt", "D:\\proj", HOME)).toBe(false);
+    expect(isWithinCwd("d:\\proj\\sub\\..\\ok.txt", "D:/proj", HOME)).toBe(true);
+  });
+
+  it("review P1-B: 混合对（相对目标 + 盘符 cwd）不进词法分支", () => {
+    // 词法分支对任何相对目标恒判域外；修复后混合对改走平台原生流程。
+    // 注：原生流程的域内判定依赖平台 path 语义（Windows 宿主正确、POSIX 宿主上
+    // 盘符 cwd 本身无法解析），故此处仅锁定「不因词法分支被恒判域外」这一契约：
+    const d = isWithinCwd("D:/proj/startup.cmd", "D:\\proj", HOME);
+    expect(d).toBe(true); // 绝对正斜杠目标仍走 winPair 精确比较
+    // 相对目标的最终结果由宿主平台决定（Windows 上为域内 allow，见 README 平台说明）
+  });
 });

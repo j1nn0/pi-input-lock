@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.1] - 2026-08-26
+
+### Fixed
+
+- **Windows host: in-project writes were wrongly gated as external (FR-3)**. `isWithinCwd`'s Windows-absolute early-out did not exclude the case where the cwd itself is a drive-letter path — on a Windows host, any project file written with forward-slash form (`D:/proj/startup.cmd` vs cwd `D:\proj`) was treated as out-of-domain and prompted. Now: when both target and cwd are Windows absolute paths, they are compared with normalized separators, case, and folded `./..` dot-segments; the always-external rule only applies when the host cwd is POSIX-style (WSL/CI). Cross-drive targets stay external. Same separator normalization applied to `isTrustedPath` prefix matching. Mixed pairs (relative target + drive-letter cwd) route through the platform-native resolution instead of the lexical branch.
+
 ## [1.1.0] - 2026-08-26
 
 ### Added

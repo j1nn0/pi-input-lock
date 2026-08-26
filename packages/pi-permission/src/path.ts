@@ -110,11 +110,18 @@ export function isTrustedPath(
 ): boolean {
   const abs = normalizePath(target, cwd, home);
   const real = realpathOf(abs);
-  const candidates = [abs, real].filter((p): p is string => Boolean(p));
-  for (const p of candidates) {
-    for (const prefix of prefixes) {
-      const expanded = expandHome(prefix, home);
-      if (p === expanded || p.startsWith(expanded + path.sep)) return true;
+  // 候选与前缀都补反斜杠归一化变体（review P2-1 / 用户反馈：PS 侧常写正斜杠、
+  // 配置里可能写反斜杠，跨形态前缀比较需归一化后进行）
+  const candidates = [...new Set([abs, real].filter((p): p is string => Boolean(p)))];
+  const candForms = candidates.flatMap((p) => (p.includes("\\") ? [p, p.replace(/\\/g, "/")] : [p]));
+  for (const prefix of prefixes) {
+    const expanded = expandHome(prefix, home);
+    const forms = expanded.includes("\\") ? [expanded, expanded.replace(/\\/g, "/")] : [expanded];
+    for (const f of forms) {
+      const sep = f.includes("/") ? "/" : path.sep;
+      for (const p of candForms) {
+        if (p === f || p.startsWith(f + sep)) return true;
+      }
     }
   }
   return false;
@@ -130,10 +137,21 @@ export function isSensitiveReadException(target: string, cwd: string, home: stri
 /**
  * 判断路径是否落在 cwd 内（FR-3 项目边界判定基准）。
  * 比较基于 realpath（符号链接已解析）；目标不存在时回退到归一化路径。
- * Windows 风格绝对路径（盘符 / UNC）在任何平台上都视为 cwd 外——POSIX resolve 会把
- * `C:\x` 误判为相对路径，导致跨平台运行时（如 WSL/CI）出现错误的域内放行。
+ * Windows 盘符/UNC 处理分两种情况：
+ * - 宿主本身是 Windows 风格 cwd（生产常态）：双方都归一化分隔符/大小写后做前缀比较；
+ * - POSIX 宿主（WSL/CI）收到 Windows 绝对路径目标：POSIX resolve 会把 `C:\x` 误当相对
+ *   路径拼进 cwd 造成错误的域内放行，故恒判域外。
  */
 export function isWithinCwd(target: string, cwd: string, home: string): boolean {
+  // 双方均为 Windows 绝对路径（Windows 宿主常态）：先折叠 ./.. 点段（纯词法、跨平台可用，
+  // 纯前缀比较可被 `a/../..` 穿越逃逸——review P1），再归一化分隔符/大小写做前缀比较。
+  // 仅此分支走词法判定；混合对（如 Windows 宿主上相对路径目标 + 盘符 cwd，生产常态）
+  // 必须落到下方原生流程：path.win32.resolve 在真实 Windows 上才能正确判域内域外（review P1-B）。
+  if (isWindowsAbsolute(target) && isWindowsAbsolute(cwd)) {
+    const t = normWinPath(path.win32.normalize(target));
+    const c = normWinPath(path.win32.normalize(cwd));
+    return t === c || t.startsWith((c.endsWith("/") ? c : c + "/"));
+  }
   if (isWindowsAbsolute(target)) return false;
   const abs = normalizePath(target, cwd, home);
   // 深解析：目标不存在时也解析其父目录软链，防止 `link/newfile`（link→域外）被误判为域内
@@ -145,4 +163,10 @@ export function isWithinCwd(target: string, cwd: string, home: string): boolean 
 /** Windows 风格绝对路径：盘符路径（`C:\...` / `C:/...`）或 UNC 路径（`\\server\share`）。 */
 function isWindowsAbsolute(p: string): boolean {
   return /^[A-Za-z]:[\\\/]/.test(p) || p.startsWith("\\\\");
+}
+
+/** Windows 路径归一化：反斜杠→正斜杠、小写（NTFS 大小写不敏感；
+ * 已知限制：\\wsl$ 挂载的大小写敏感 ext4 上，大小写变体兄弟目录会被误判同目录，方向为放行）。 */
+function normWinPath(p: string): string {
+  return p.replace(/\\/g, "/").toLowerCase();
 }

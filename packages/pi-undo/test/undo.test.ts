@@ -236,7 +236,7 @@ describe("doUndo integration (via mock pi)", () => {
     expect(ctx.navigateTree).not.toHaveBeenCalled();
     expect(ctx.ui.setEditorText).not.toHaveBeenCalled();
     expect(ctx.ui.notify).toHaveBeenCalledWith(
-      expect.stringContaining("Cannot reach host editor"),
+      expect.stringContaining("Host TUI reference unavailable"),
       "warning",
     );
   });
@@ -308,7 +308,95 @@ describe("doUndo integration (via mock pi)", () => {
     await commandHandlers["undo"]!({}, ctx);
     expect(ctx.abort).not.toHaveBeenCalled();
     expect(ctx.ui.notify).toHaveBeenCalledWith(
-      expect.stringContaining("Cannot reach host editor"),
+      expect.stringContaining("Host editor structure changed"),
+      "warning",
+    );
+  });
+
+  // 诱饵节点：兄弟子树中存在任意 Map 但不含 dequeue 键，不应误命中
+  it("诱饵 Map 节点不误命中：兄弟子树有空 Map 时仍命中真实编辑器", async () => {
+    const { mockPi, commandHandlers, handlers } = createMockPi();
+    const mod = await import("../src/index.ts");
+    (mod.default as any)(mockPi);
+    const dequeueHandler = vi.fn();
+    // 兄弟子树首节点为诱饵（有 actionHandlers Map 但缺 dequeue），真实编辑器在后
+    const fakeTui = {
+      children: [
+        { actionHandlers: new Map([["other.action", vi.fn()]]) },
+        { children: [{ actionHandlers: new Map([["app.message.dequeue", dequeueHandler]]) }] },
+      ],
+    };
+    const ctx = createMockCtx({
+      isIdle: vi.fn(() => false),
+      abort: vi.fn(),
+      hasPendingMessages: vi.fn(() => true),
+      mode: "tui",
+    });
+    await handlers["session_start"]!({}, ctx);
+    (ctx.ui.setWidget.mock.calls[0]?.[1] as (tui: unknown) => unknown)(fakeTui);
+    await commandHandlers["undo"]!({}, ctx);
+    expect(dequeueHandler).toHaveBeenCalledTimes(1);
+    expect(ctx.abort).not.toHaveBeenCalled();
+    expect(ctx.ui.notify).not.toHaveBeenCalled();
+  });
+
+  // hasPendingMessages 抛错保守化：不坠入 abort、不动会话树、不消耗预算
+  it("hasPendingMessages 抛错时保守返回，不 abort、不导航、不消耗预算", async () => {
+    const { mockPi, commandHandlers, handlers } = createMockPi();
+    const mod = await import("../src/index.ts");
+    (mod.default as any)(mockPi);
+    const branch = [branchWithUser("1", null, "msg-conservative")];
+    const ctx = createMockCtx({
+      sessionManager: {
+        getSessionId: vi.fn(() => "sid-conservative"),
+        getBranch: vi.fn(() => branch),
+        branch: vi.fn(),
+        resetLeaf: vi.fn(),
+      },
+      isIdle: vi.fn(() => false),
+      abort: vi.fn(),
+      hasPendingMessages: vi.fn(() => { throw new Error("queue boom"); }),
+      navigateTree: vi.fn(async () => {}),
+      mode: "tui",
+    });
+    await handlers["session_start"]!({}, ctx);
+    await commandHandlers["undo"]!({}, ctx);
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("Cannot determine queue state"),
+      "warning",
+    );
+    expect(ctx.abort).not.toHaveBeenCalled();
+    expect(ctx.navigateTree).not.toHaveBeenCalled();
+    expect(mockPi.appendEntry).not.toHaveBeenCalled();
+    // 未消耗单次/轮：修复 hasPending 后重试应能正常导航（fall through 到硬撤）
+    ctx.ui.notify.mockClear();
+    ctx.hasPendingMessages = vi.fn(() => false);
+    (ctx as any).isIdle = vi.fn(() => true);
+    await commandHandlers["undo"]!({}, ctx);
+    expect(ctx.navigateTree).toHaveBeenCalledWith("1", { summarize: false });
+  });
+
+  // 生命周期：session_shutdown 应清理捕获的 TUI 引用
+  it("session_shutdown 清理捕获的 TUI 引用，后续队列取回走 TUI 缺失降级", async () => {
+    const { mockPi, commandHandlers, handlers } = createMockPi();
+    const mod = await import("../src/index.ts");
+    (mod.default as any)(mockPi);
+    const dequeueHandler = vi.fn();
+    const fakeTui = { children: [{ actionHandlers: new Map([["app.message.dequeue", dequeueHandler]]) }] };
+    const ctx = createMockCtx({
+      isIdle: vi.fn(() => false),
+      abort: vi.fn(),
+      hasPendingMessages: vi.fn(() => true),
+      mode: "tui",
+    });
+    await handlers["session_start"]!({}, ctx);
+    (ctx.ui.setWidget.mock.calls[0]?.[1] as (tui: unknown) => unknown)(fakeTui);
+    // 清理
+    await handlers["session_shutdown"]!({}, ctx);
+    await commandHandlers["undo"]!({}, ctx);
+    expect(dequeueHandler).not.toHaveBeenCalled();
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("Host TUI reference unavailable"),
       "warning",
     );
   });

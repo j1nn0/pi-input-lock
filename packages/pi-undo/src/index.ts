@@ -70,7 +70,8 @@ interface EditorLike {
 function findCustomEditor(node: unknown, depth = 0): EditorLike | undefined {
   if (!node || typeof node !== "object" || depth > 6) return undefined;
   const n = node as Record<string, unknown>;
-  if (n.actionHandlers instanceof Map) return n as EditorLike;
+  // 精确匹配：只命中注册了官方 dequeue 的编辑器，避免诱饵 Map 误命中
+  if (n.actionHandlers instanceof Map && (n.actionHandlers as Map<string, unknown>).has("app.message.dequeue")) return n as EditorLike;
   const children = n.children;
   if (Array.isArray(children)) {
     for (const child of children) {
@@ -143,22 +144,37 @@ export default function (pi: ExtensionAPI) {
       // CustomEditor.actionHandlers 中注册的官方 handler，避免模拟按键序列。
       try {
         const hasPendingFn = (ctx as unknown as { hasPendingMessages?: () => boolean }).hasPendingMessages;
-        if (typeof hasPendingFn === "function" && hasPendingFn.call(ctx)) {
-          const tui = capturedTui.current;
-          const editor = tui ? findCustomEditor(tui) : undefined;
-          const dequeueHandler =
-            editor?.actionHandlers instanceof Map
-              ? editor.actionHandlers.get("app.message.dequeue")
-              : undefined;
-          if (typeof dequeueHandler === "function") {
-            try { dequeueHandler(); } catch (e) {
-              safeNotify(`Failed to recall queued messages: ${e instanceof Error ? e.message : String(e)}`, "warning");
-            }
-          } else {
-            // TUI 引用缺失或宿主结构变化（版本漂移）：提示用户手动按 dequeue 快捷键
-            safeNotify("Cannot reach host editor — press the dequeue shortcut (alt+up; alt+q on Windows) to recall queued messages", "warning");
+        if (typeof hasPendingFn === "function") {
+          let hasPending: boolean;
+          try {
+            hasPending = hasPendingFn.call(ctx);
+          } catch (e) {
+            // 无法判定队列状态时保守返回，不坠入 abort 分支
+            safeNotify(`Cannot determine queue state: ${e instanceof Error ? e.message : String(e)} \u2014 try again or use the dequeue shortcut (alt+up; alt+q on Windows)`, "warning");
+            return;
           }
-          return;
+          if (hasPending) {
+            const tui = capturedTui.current;
+            // TUI 引用缺失：单独提示
+            if (tui === undefined) {
+              safeNotify("Host TUI reference unavailable \u2014 press the dequeue shortcut (alt+up; alt+q on Windows) to recall queued messages", "warning");
+              return;
+            }
+            const editor = findCustomEditor(tui);
+            const dequeueHandler =
+              editor?.actionHandlers instanceof Map
+                ? editor.actionHandlers.get("app.message.dequeue")
+                : undefined;
+            if (typeof dequeueHandler === "function") {
+              try { dequeueHandler(); } catch (e) {
+                safeNotify(`Failed to recall queued messages: ${e instanceof Error ? e.message : String(e)}`, "warning");
+              }
+            } else {
+              // 宿主结构漂移：未找到编辑器或 dequeue action 已改名
+              safeNotify("Host editor structure changed \u2014 press the dequeue shortcut (alt+up; alt+q on Windows) to recall queued messages", "warning");
+            }
+            return;
+          }
         }
       } catch {}
 
@@ -291,6 +307,8 @@ export default function (pi: ExtensionAPI) {
     const sid = sessionIdOf(ctx);
     canUndoBySid.delete(sid);
     pendingBySid.delete(sid);
+    // 生命周期清理：释放捕获的 TUI 引用，避免跨会话残留
+    capturedTui.current = undefined;
   });
 
   // 快捷键可配：~/.pi/agent/extensions/pi-undo/config.json {"shortcut":"alt+u"}，需 /reload

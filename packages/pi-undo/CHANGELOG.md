@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.3] - 2026-08-29
+
+- fix: harden queued-message recall path
+  - fix: `findCustomEditor` now matches by action key — require `has("app.message.dequeue")` so decoy nodes with an `actionHandlers` map cannot shadow the real editor
+  - fix: `session_shutdown` clears the captured TUI reference (`capturedTui.current = undefined`) to avoid stale cross-session references
+  - fix: split the two queue-recall fallback notices — missing TUI reference (`Host TUI reference unavailable`) vs host structure drift (`Host editor structure changed`); both keep the manual dequeue shortcut hint
+  - fix: `hasPendingMessages` throwing now returns conservatively (notify + return, no fall-through to the abort branch); hosts without the method keep the original fall-through semantics
+- test: add cases for decoy-map still resolving the real editor, shutdown clearing the TUI reference, and the conservative `hasPendingMessages`-error path; update fallback assertions affected by the notice split
+
 ## [0.1.2] - 2026-08-25
 
 - fix: mid-turn alt+u undid an arbitrary earlier exchange instead of the just-sent message (no stable pattern)

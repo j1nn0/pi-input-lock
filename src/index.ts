@@ -1,33 +1,33 @@
 /**
- * pi-reader — Vim 风格阅读模式扩展（fullscreen）
+ * pi-input-lock — Vim 風リーディングモード拡張（旧 pi-reader ベース、fullscreen）
  *
- * 架构：TUI inputListener + onTerminalInput 双通道：
- *   - alt+o（config.json: toggleKey 可改）进/出 READING，Promise 异步展开工具
- *   - ctrl-u/d 半页上/下   ctrl-f/b 整页上/下   j/k 行级
- *   - g g 顶部（300ms，含同批 gg）  G 底部
- *   - [q/]q 问题  [a/]a 回答  [t/]t 工具  {/} 段落  / n/N 搜索
- *   - esc/i/c 退出 READING   ? 帮助弹窗（英文，Esc 关闭）
- *   - 输入栏 READING 时左显 ◉ Reading 覆盖，原输入保留
- *   - count 前缀 1-9 累积（0 仅已有 buffer 时追加，800ms 清空），5j / 3]q 生效
- * 弹窗让路（plan-dialog-interaction-fix）：外部组件夺焦（扩展弹窗/ui.input 等）期间，
- *   唯一拦截的是 toggle 键（放行会致容器重建 + promise 悬挂），其余全量透传；
- *   探测为每键实时焦点比对 focusedComponent ≠ reader 编辑器（豁免自有帮助/搜索组件）
- * 搜索状态机（满足四目标）：
+ * アーキテクチャ：TUI inputListener + onTerminalInput 二重チャネル:
+ *   - alt+o（config.json: toggleKey で変更可能）で READING に出入り、Promise で非同期にツール展開
+ *   - ctrl-u/d 半ページ上/下   ctrl-f/b 1ページ上/下   j/k 行単位
+ *   - g g 先頭（300ms、同バッチの gg を含む）  G 末尾
+ *   - [q/]q 質問  [a/]a 回答  [t/]t ツール  {/} 段落  / n/N 検索
+ *   - esc/i/c で READING 終了   ? ヘルプポップアップ（英語、Esc で閉じる）
+ *   - 入力欄は READING 時に左側に ◉ Reading を表示して覆い、元の入力は保持
+ *   - count プレフィックス 1-9 を蓄積（0 は既存 buffer がある場合のみ追加、800ms でクリア）、5j / 3]q が有効
+ * ダイアログ譲渡（plan-dialog-interaction-fix）：外部コンポーネントがフォーカスを奪っている期間（拡張ダイアログ/ui.input など）、
+ *   インターセプトされるのは toggle キーのみ（解放するとコンテナ再構築 + promise 宙吊りになるため）、それ以外は全てパススルー；
+ *   検出はキーごとのリアルタイムなフォーカス比較 focusedComponent ≠ reader エディタ（自前のヘルプ/検索コンポーネントは除外）
+ * 検索ステートマシン（4つの目標を満たす）：
  *   READING --"/"--> SEARCH_INPUT --enter--> SEARCH_NAV --esc--> READING
- *   READING --"/"--> SEARCH_INPUT --esc--> READING (取消高亮)
- *   SEARCH_NAV --esc--> READING (关闭搜索栏+取消高亮)
- *   READING (无搜索) --esc--> INSERT (退出阅读)
+ *   READING --"/"--> SEARCH_INPUT --esc--> READING（ハイライト解除）
+ *   SEARCH_NAV --esc--> READING（検索バー close+ハイライト解除）
+ *   READING（検索なし） --esc--> INSERT（リーディング終了）
  */
 import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 
-// ---------- 纯逻辑（可单测） ----------
+// ---------- 純粋ロジック（単体テスト可能） ----------
 
-/** 视口半页滚动量（与 TuiAltScreen 一致：floor(vh/2)） */
+/** ビューポート半ページスクロール量（TuiAltScreen と一致：floor(vh/2)） */
 export function halfPage(vh: number): number {
   return Math.max(1, Math.floor(vh / 2));
 }
-/** 视口整页滚动量（与 TuiAltScreen OVERLAP=1 一致：vh-1） */
+/** ビューポート1ページスクロール量（TuiAltScreen OVERLAP=1 と一致：vh-1） */
 export function pageStep(vh: number): number {
   return Math.max(1, vh - 1);
 }
@@ -36,7 +36,7 @@ export type ReadingKey =
   | "toggle" | "halfUp" | "halfDown" | "pageUp" | "pageDown"
   | "lineUp" | "lineDown" | "top" | "bottom" | "exit" | "help" | "other";
 
-// ---------- 锚定与可见性（可单测） ----------
+// ---------- アンカーと可視性（単体テスト可能） ----------
 
 export type Anchor = "pinTop" | "third" | "center" | number;
 export type VisibleBehavior = "keep" | "reanchor";
@@ -44,11 +44,11 @@ export interface NavConfig {
   questionAnchor?: Anchor;
   visibleBehavior?: VisibleBehavior;
   wrapNavigation?: boolean;
-  /** 切换阅读模式时是否自动展开/收拢工具输出（plan §9.1）；未配置默认 true */
+  /** リーディングモード切替時にツール出力を自動展開/折りたたむか（plan §9.1）；未設定時のデフォルトは true */
   autoExpandTools?: boolean;
 }
 
-/** 计算锚定偏移量 */
+/** アンカーオフセットを計算 */
 export function getAnchorOffset(vh: number, anchor: Anchor): number {
   if (typeof anchor === "number") return Math.max(0, Math.min(Math.floor(anchor), Math.max(0, vh - 1)));
   if (anchor === "pinTop") return 1;
@@ -57,18 +57,18 @@ export function getAnchorOffset(vh: number, anchor: Anchor): number {
   return 1;
 }
 
-/** 判断行是否可见（留 2 行边距，避免贴底） */
+/** 行が可視か判定（上下2行のマージンを残し、底に張り付くのを防ぐ） */
 export function isRowVisible(row: number, scrollTop: number, vh: number): boolean {
   if (vh <= 0) return false;
   const visibleTop = scrollTop;
   const visibleBottom = scrollTop + vh - 1;
-  // 贴底 2 行视为不可见，促使用户看清上下文
+  // 底の2行は不可視とみなし、ユーザーがコンテキストを見やすくする
   return row >= visibleTop && row <= visibleBottom - 2;
 }
 
 /**
- * 计算目标滚动位置
- * @returns null 表示可见且 keep 策略时不动视口；否则返回 clamp 后的 scrollTop
+ * 目標スクロール位置を計算
+ * @returns null は可視かつ keep 戦略時にビューポートを動かさないことを示す；そうでなければ clamp 後の scrollTop を返す
  */
 export function computeTargetScrollTop(
   targetRow: number,
@@ -84,11 +84,11 @@ export function computeTargetScrollTop(
   return Math.max(0, Math.min(desired, Math.max(0, maxTop)));
 }
 
-// ---------- 搜索状态机（可单测） ----------
+// ---------- 検索ステートマシン（単体テスト可能） ----------
 export enum SearchMode {
-  INACTIVE = 0, // 无搜索
-  INPUT = 1,    // / 已按，接收所有输入直到 enter
-  NAV = 2,      // 已提交，n/N 导航，仅接受 ? 快捷键
+  INACTIVE = 0, // 検索なし
+  INPUT = 1,    // / が押下され、enter まで全入力を受信
+  NAV = 2,      // 送信済み、n/N でナビゲーション、? ショートカットのみ受け付ける
 }
 export function isEnterKey(d: string): boolean {
   if (d === "\r" || d === "\n" || d === "\x0d" || d === "\x0a") return true;
@@ -103,32 +103,32 @@ export function isEscKey(d: string): boolean {
   if (d.startsWith("\x1b[27")) return true;
   try { if (matchesKey(d, "escape")) return true; } catch {}
   try { if (matchesKey(d, Key.escape)) return true; } catch {}
-  // \x1b 单字节 esc 已在 parseReadingKey 中单独处理，isEscKey 需严格避免 alt+o 误判
+  // \x1b 単バイト esc は parseReadingKey で個別に処理済み、isEscKey は alt+o の誤判定を厳密に避ける必要がある
   if (d === "\x1b") return true;
   return false;
 }
 
-// ---------- 按键路由（双渠道共用核心，依赖注入可单测；见 plan-dialog-interaction-fix §4.1.2） ----------
+// ---------- キールーティング（二重チャネル共有コア、依存性注入で単体テスト可能；plan-dialog-interaction-fix §4.1.2 参照） ----------
 
-/** 判断 TUI 是否处于原生搜索态（activeSearch 存在即视为有搜索栏） */
+/** TUI がネイティブ検索状態にあるか判定（activeSearch が存在すれば検索バーありとみなす） */
 export function hasActiveSearch(tui: any): boolean {
   try { return !!(tui as any)?.activeSearch; } catch { return false; }
 }
 
-/** reader 自有组件引用集合（焦点豁免用） */
+/** reader 所有のコンポーネント参照集合（フォーカス除外用） */
 export interface OwnFocusRefs {
-  /** reader 自己创建的最新编辑器实例（ScrollReaderEditor / ReadonlyEditor） */
+  /** reader が自前で作成した最新のエディタインスタンス（ScrollReaderEditor / ReadonlyEditor） */
   editor?: unknown;
-  /** 帮助 overlay 组件引用 */
+  /** ヘルプ overlay コンポーネント参照 */
   help?: unknown;
-  /** 原生搜索输入组件（activeSearch.component） */
+  /** ネイティブ検索入力コンポーネント（activeSearch.component） */
   searchComponent?: unknown;
 }
 
 /**
- * 弹窗夺焦判定本体（纯函数，可单测）：焦点被非 reader 组件持有时为真。
- * 三重豁免：reader 编辑器、自有帮助 overlay、原生搜索输入组件——
- * 不依赖「overlay.hide 同步还原 preFocus」的隐式时序。
+ * ダイアログフォーカス奪取判定本体（純粋関数、単体テスト可能）：フォーカスが非 reader コンポーネントに保持されている場合に真。
+ * 三重除外：reader エディタ、自前のヘルプ overlay、ネイティブ検索入力コンポーネント ——
+ * 「overlay.hide が同期的に preFocus を復元する」という暗黙のタイミングに依存しない。
  */
 export function isForeignFocus(focus: unknown, own: OwnFocusRefs): boolean {
   if (!focus) return false;
@@ -138,87 +138,87 @@ export function isForeignFocus(focus: unknown, own: OwnFocusRefs): boolean {
   return true;
 }
 
-/** inputListener / onTerminalInput 的返回结果 */
+/** inputListener / onTerminalInput の戻り値 */
 export type RouteResult = { consume: true } | undefined;
 
-/** 双渠道共用按键路由的依赖注入接口：listener 只做薄接线，路由逻辑独立单测 */
+/** 二重チャネル共有キールーティングの依存性注入インターフェース：listener は薄い配線のみ、ルーティングロジックは独立して単体テスト可能 */
 export interface ReadingRouterIO {
-  /** 是否处于 READING */
+  /** READING 状態にあるか */
   isReading(): boolean;
-  /** 搜索状态机当前值 */
+  /** 検索ステートマシンの現在値 */
   searchMode(): SearchMode;
-  /** 帮助弹窗是否打开 */
+  /** ヘルプポップアップが開いているか */
   helpOpen(): boolean;
-  /** 外部组件夺焦探测（扩展弹窗/ui.input 等一切夺焦场景）；为真时除渠道 1 的 toggle 外全量透传 */
+  /** 外部コンポーネントのフォーカス奪取検出（拡張ダイアログ/ui.input など全ての奪取シーン）；真の場合はチャネル1の toggle 以外は全てパススルー */
   dialogOpen(): boolean;
-  /** 当前 TUI 引用 */
+  /** 現在の TUI 参照 */
   getTui(): any;
-  /** 双通道去重（terminal 对极短时间内重复投递抑制） */
+  /** 二重チャネルの重複排除（terminal が極短時間内に重複配信するのを抑制） */
   isDuplicateNav(data: string, source: "input" | "terminal"): boolean;
-  /** 搜索输入处理（INPUT 态全量接收直到 enter/esc）；返回 undefined 表示未消费 */
+  /** 検索入力処理（INPUT 状態で enter/esc まで全て受信）；undefined を返せば未消費 */
   handleSearchInput(data: string, tui: any, source: "input" | "terminal"): boolean | undefined;
-  /** esc 二义处理：有搜索栏就关搜索取消高亮，否则退出阅读 */
+  /** esc の二義性処理：検索バーがあれば検索を閉じてハイライト解除、なければリーディングを終了 */
   handleEsc(tui: any): void;
-  /** 清搜索栏并取消高亮，重置状态机，留在 READING */
+  /** 検索バーをクリアしてハイライト解除、ステートマシンをリセット、READING に留まる */
   closeSearch(tui: any): void;
-  /** 切换阅读模式 */
+  /** リーディングモード切替 */
   toggle(): void;
-  /** 打开帮助弹窗 */
+  /** ヘルプポップアップを開く */
   showHelp(): void;
-  /** 关闭帮助 overlay（done→hideOverlay；弹窗持焦时不抢焦点） */
+  /** ヘルプ overlay を閉じる（done→hideOverlay；ダイアログがフォーカスを保持している場合は奪わない） */
   closeHelp(): void;
-  /** app.tools.expand 键位匹配 */
+  /** app.tools.expand キーバインド一致 */
   matchesExpand(data: string): boolean;
-  /** 工具展开切换（app.tools.expand 命中时调用，含锚点保位） */
+  /** ツール展開切替（app.tools.expand ヒット時に呼び出し、アンカー保持付き） */
   toggleToolsExpanded(): void;
-  /** 语义导航（/ n N {} 与 [q/a/t 序列）；返回 true 表示已消费 */
+  /** セマンティックナビゲーション（/ n N {} と [q/a/t シーケンス）；true を返せば消費済み */
   trySemanticNav(data: string, tui: any): boolean;
-  /** 视口高度读取（异常时兜底 20） */
+  /** ビューポート高さ取得（例外時は 20 でフォールバック） */
   getViewportHeight(tui: any): number;
-  /** gg 双击判定 */
+  /** gg ダブルクリック判定 */
   ggPress(): boolean;
   ggReset(): void;
   countPeek(): number | undefined;
   countReset(): void;
-  /** 重置 count buffer 与 [ ] 序列缓冲（透传前清残留修饰状态） */
+  /** count buffer と [ ] シーケンスバッファをリセット（パススルー前に残留修飾状態をクリア） */
   resetModifiers(): void;
-  /** 记录上次语义跳目标 */
+  /** 前回のセマンティックジャンプ先を記録 */
   updateLastSemantic(row: number): void;
   requestRender(tui: any): void;
 }
 
 /**
- * 创建双渠道共用的按键路由（TUI inputListener = "input"，onTerminalInput = "terminal"）。
+ * 二重チャネル共有のキールーティングを作成（TUI inputListener = "input"、onTerminalInput = "terminal"）。
  *
- * 分层语义（plan §5）：
- * - 外部弹窗夺焦期间：唯一拦截的是 toggle——它是唯一直接操作「层」本身的按键，
- *   放行会导致编辑器容器重建、弹窗 promise 永久悬挂（Bug B）；其余按键全部透传；
- * - 渠道 2 的 toggle/help 让渡渠道 1 统一处理，避免双通道重复；
- * - READING 内优先级：SEARCH_INPUT > toggle > help > exit > expand > 语义导航 > 滚动。
+ * 階層セマンティクス（plan §5）：
+ * - 外部ダイアログがフォーカスを奪っている期間：インターセプトされるのは toggle のみ — それは「レイヤー」自体を直接操作する唯一のキーであり、
+ *   解放するとエディタコンテナが再構築されダイアログの promise が永久に宙吊りになる（Bug B）；他のキーは全てパススルー；
+ * - チャネル2の toggle/help はチャネル1に譲渡して一元処理し、二重チャネルの重複を避ける；
+ * - READING 内の優先度：SEARCH_INPUT > toggle > help > exit > expand > セマンティックナビゲーション > スクロール。
  */
 export function createReadingKeyRouter(io: ReadingRouterIO, source: "input" | "terminal"): (data: string) => RouteResult {
   return (data: string): RouteResult => {
     const tui = io.getTui();
     const reading = io.isReading();
 
-    // ─── 外部弹窗/帮助并存期的按键接管（设计约束，勿改语义）─────
+    // ─── 外部ダイアログ/ヘルプ共存時のキー掌握（設計制約、セマンティクスを変更しないこと）─────
     //
-    // 分发模型：pi-tui 先逐个执行 TUI 级 inputListeners（本函数即其中之一），
-    // 任一 consume 则终止分发；全部放行才轮到 focusedComponent.handleInput。
-    // 即本函数位于焦点组件（弹窗）的「上游必经之路」，consume = 键永远消失，
-    // 放行 = 继续流向下游焦点窗体。核心在弹窗出现时 setFocus(弹窗)，
-    // 帮助 overlay 只是视觉残留在上层、已失焦——「逻辑栈顶」由本路由的判定模拟。
+    // ディスパッチモデル：pi-tui はまず TUI レベルの inputListeners を順に実行（本関数もその一つ）、
+    // いずれかが consume すればディスパッチを終了；全てが解放して初めて focusedComponent.handleInput の番になる。
+    // すなわち本関数はフォーカスコンポーネント（ダイアログ）の「上流の必須経路」に位置し、consume = キーは永遠に消失、
+    // 解放 = 下流のフォーカスウィンドウへ流れ続ける。コアはダイアログ出現時に setFocus(ダイアログ) する、
+    // ヘルプ overlay は視覚的に上層に残留するだけで既にフォーカスを失っている — 「論理的なスタックトップ」は本ルーティングの判定で模擬する。
     //
-    // 三态决策表：
-    //   ① help 开 && 焦点被外部夺走：UI 最上层是帮助 → 逻辑上也置顶——
-    //      esc 关帮助（closeHelp 走 overlay hide，仅在自持焦点时才恢复焦点，
-    //      故不抢弹窗焦点），其余键一律承接吞掉（与帮助常态「只认 esc」一致，
-    //      不下漏到看不见的弹窗，防误 terminate）；关闭后落入态②
-    //   ② 仅外部弹窗夺焦：只吞 toggle——它是唯一直接操作「层」本身的键，
-    //      放行会触发核心 setCustomEditorComponent 无条件 editorContainer.clear()，
-    //      弹窗 promise 永久悬挂（Bug B）；其余全量放行给弹窗正常操作（Bug A 修复）
-    //   ③ 都不是：落到下方常规阅读路由
-    // 探测为每键实时焦点比对（非快照），链式弹窗 select→input 换组件也能感知。
+    // 三状態の決定表：
+    //   ① help が開いており && フォーカスが外部に奪われている：UI 最上層はヘルプ → 論理的にも最前面に —
+    //      esc でヘルプを閉じる（closeHelp は overlay hide を経由、自身がフォーカスを保持している場合のみフォーカスを復元、
+    //      故ダイアログのフォーカスを奪わない）、他のキーは一律で受け止めて消費（ヘルプの通常状態「esc のみ認識」と一致、
+    //      見えないダイアログへは漏らさず、誤った terminate を防止）；閉じた後は状態②へ落ちる
+    //   ② 外部ダイアログのみがフォーカスを奪っている：toggle のみを消費 — それは「レイヤー」自体を直接操作する唯一のキーであり、
+    //      解放するとコアの setCustomEditorComponent が無条件に editorContainer.clear() を発火し、
+    //      ダイアログの promise が永久に宙吊りになる（Bug B）；その他は全てダイアログの通常操作のために解放（Bug A 修正）
+    //   ③ どちらでもない：下方の通常リーディングルーティングへ落ちる
+    // 検出はキーごとのリアルタイムなフォーカス比較（スナップショットではない）、連鎖ダイアログ select→input のコンポーネント切替も感知可能。
     if (io.dialogOpen()) {
       if (source === "terminal") {
         if (io.helpOpen()) {
@@ -226,7 +226,7 @@ export function createReadingKeyRouter(io: ReadingRouterIO, source: "input" | "t
             io.closeHelp();
             io.requestRender(tui);
           }
-          // esc 关帮助；其余键一律承接不透传（UI 与逻辑统一在帮助层）
+          // esc でヘルプを閉じる；他のキーは一律で受け止めてパススルーしない（UI とロジックをヘルプ層で統一）
           return { consume: true };
         }
         if (parseReadingKey(data) === "toggle") {
@@ -236,19 +236,19 @@ export function createReadingKeyRouter(io: ReadingRouterIO, source: "input" | "t
       return undefined;
     }
 
-    // 帮助 overlay 打开（无外部弹窗）：两渠道均早退（焦点在 overlay 上，自收输入）
+    // ヘルプ overlay が開いている（外部ダイアログなし）：両チャネルとも早期リターン（フォーカスが overlay 上にあり、自ら入力を受け取る）
     if (io.helpOpen()) return undefined;
 
     const key = parseReadingKey(data);
 
-    // 渠道 1：toggle 切换阅读模式（置于 SEARCH_INPUT 之前，维持原优先级）
+    // チャネル1：toggle でリーディングモード切替（SEARCH_INPUT の前に配置、元の優先度を維持）
     if (source === "terminal" && key === "toggle") {
       io.toggle();
       io.requestRender(tui);
       return { consume: true };
     }
 
-    // SEARCH_INPUT：接收所有输入直到 enter（优先级最高，?/i/toggle 等亦作文本）
+    // SEARCH_INPUT：enter まで全入力を受信（最優先、?/i/toggle などもテキストとして扱う）
     if (reading && io.searchMode() === SearchMode.INPUT) {
       const r = io.handleSearchInput(data, tui, source);
       if (r !== undefined) {
@@ -258,20 +258,20 @@ export function createReadingKeyRouter(io: ReadingRouterIO, source: "input" | "t
       return undefined;
     }
 
-    // 渠道 2：toggle/help 仍由渠道 1 统一处理，避免双通道重复
+    // チャネル2：toggle/help は依然としてチャネル1で一元処理し、二重チャネルの重複を避ける
     if (source === "input" && (key === "toggle" || key === "help")) return undefined;
 
-    // 渠道 1：非阅读态只关心上方已处理的 toggle
+    // チャネル1：非リーディング状態では上方で処理済みの toggle のみを気にする
     if (source === "terminal" && !reading) return undefined;
 
-    // 渠道 1：? 打开帮助
+    // チャネル1：? でヘルプを開く
     if (key === "help") {
       io.showHelp();
       io.requestRender(tui);
       return { consume: true };
     }
 
-    // exit (esc/i/ctrl+c)：esc 二义由 handleEsc 统一——有搜索先关搜索，否则退阅读
+    // exit (esc/i/ctrl+c)：esc の二義性は handleEsc で一元処理 — 検索があればまず検索を閉じ、なければリーディングを終了
     if (key === "exit") {
       if (!reading) return undefined;
       if (isEscKey(data) || data === "\x1b") {
@@ -279,7 +279,7 @@ export function createReadingKeyRouter(io: ReadingRouterIO, source: "input" | "t
         io.requestRender(tui);
         return { consume: true };
       }
-      // i / ctrl+c：有搜索时先清搜索（留在 READING），无搜索才退出
+      // i / ctrl+c：検索があればまず検索をクリア（READING に留まる）、検索がなければ終了
       if (io.searchMode() !== SearchMode.INACTIVE || hasActiveSearch(tui)) {
         io.closeSearch(tui);
         io.requestRender(tui);
@@ -292,7 +292,7 @@ export function createReadingKeyRouter(io: ReadingRouterIO, source: "input" | "t
 
     if (!reading) return undefined;
 
-    // app.tools.expand（显式绑定键优先于固定白名单的语义导航，plan §9.2）
+    // app.tools.expand（明示的にバインドされたキーは固定ホワイトリストのセマンティックナビゲーションより優先、plan §9.2）
     try {
       if (io.matchesExpand(data)) {
         if (io.isDuplicateNav(data, source)) return { consume: true };
@@ -300,18 +300,18 @@ export function createReadingKeyRouter(io: ReadingRouterIO, source: "input" | "t
         io.requestRender(tui);
         return { consume: true };
       }
-    } catch { /* 键位表不可用则忽略 */ }
+    } catch { /* キーバインド表が利用不可なら無視 */ }
 
-    // 双通道去重：同一按键极短时间内重复到达只处理一次
+    // 二重チャネルの重複排除：同一キーが極短時間内に重複して到達した場合は一度だけ処理
     if (io.isDuplicateNav(data, source)) return { consume: true };
 
-    // 语义导航：/ n N {} 与 [q/a/t 序列
+    // セマンティックナビゲーション：/ n N {} と [q/a/t シーケンス
     if (io.trySemanticNav(data, tui)) {
       io.requestRender(tui);
       return { consume: true };
     }
 
-    // 滚动导航
+    // スクロールナビゲーション
     const vh = Math.max(1, io.getViewportHeight(tui));
     const half = halfPage(vh);
     const page = pageStep(vh);
@@ -335,14 +335,14 @@ export function createReadingKeyRouter(io: ReadingRouterIO, source: "input" | "t
           io.countReset();
           io.updateLastSemantic(0);
         } else {
-          // 首 g：等待窗口内第二次 g
+          // 最初の g：ウィンドウ内で2回目の g を待機
           return { consume: true };
         }
         break;
       case "other":
         if (source === "terminal") {
-          // 多字节 CSI/SSU 序列（含 application cursor keys \x1bO…，§3.3）透传给焦点组件。
-          // 注：此处不清理修饰缓冲（与 input 渠道不对称）——同一按键随后必达 input 渠道，
+          // 複数バイトの CSI/SSU シーケンス（application cursor keys \x1bO… を含む、§3.3）をフォーカスコンポーネントへパススルー。
+          // 注：ここでは修飾バッファをクリアしない（input チャネルと非対称）— 同一キーはその後必ず input チャネルに到達するため、
           // 由其 CSI/SSU 透传分支统一 countReset+resetModifiers，净效果一致
           if (data.length > 1 && (data.startsWith("\x1b[") || data.startsWith("\x1bO"))) return undefined;
         } else {
@@ -471,7 +471,7 @@ export function findParagraphBounds(lines: string[], from: number, dir: -1 | 1):
   }
 }
 
-// ---------- 视口状态（可单测，需 try/catch 降级） ----------
+// ---------- ビューポート状態（単体テスト可能、try/catch によるフォールバックが必要） ----------
 
 export interface ViewportState {
   scrollView: any | null;
@@ -482,7 +482,7 @@ export interface ViewportState {
   contentHeight: number;
 }
 
-/** 读取视口状态，需 try/catch 外层保证 regular 下静默 */
+/** ビューポート状態を読み取り、try/catch の外側で regular 環境ではサイレントに保証 */
 export function getViewportState(tui: any): ViewportState {
   try {
     const sv: any = tui?.currentLayout?.primaryScrollView ?? tui?.getPrimaryScrollView?.() ?? null;
@@ -542,7 +542,7 @@ export function getViewportState(tui: any): ViewportState {
   }
 }
 
-/** 锚定滚动：计算目标并 scrollTo，返回是否滚动 */
+/** アンカースクロール：ターゲットを計算して scrollTo し、スクロールしたかを返す */
 export function scrollToAnchor(tui: any, targetRow: number, anchor: Anchor, visibleBehavior: VisibleBehavior = "keep"): boolean {
   const vs = getViewportState(tui);
   if (!vs.scrollView) return false;
@@ -555,23 +555,23 @@ export function scrollToAnchor(tui: any, targetRow: number, anchor: Anchor, visi
   } catch { return false; }
 }
 
-// ---------- 滚动锚点（模式切换保位，可单测；设计见 plan.md §4/§5） ----------
+// ---------- スクロール锚点（模式切换保位，可单测；设计见 plan.md §4/§5） ----------
 
-/** 滚动锚点：prompt 序号坐标系。展开/收起只改段内行数、不增删消息边界，k 跨切换严格稳定 */
+/** スクロール锚点：prompt 序号坐标系。展开/收起只改段内行数、不增删消息边界，k 跨切换严格稳定 */
 export interface ScrollAnchor {
-  /** 视口顶行上方最近的 prompt 序号（findPromptRows 下标）；-1 表示位于首个 prompt 之前的头部区域 */
+  /** ビューポート先頭行の直上にある直近の prompt 番号（findPromptRows のインデックス）；-1 は最初の prompt より前のヘッダー領域を示す */
   k: number;
-  /** 视口顶行距该锚点的行偏移（同段内偏移；k=-1 时为距文档顶距离） */
+  /** ビューポート先頭行から当該アンカーまでの行オフセット（セグメント内オフセット；k=-1 のときはドキュメント先頭からの距離） */
   d: number;
-  /** 全文 prompt 总数，恢复时 O(1) 校验聊天树是否重建 */
+  /** 全文 prompt 总数，恢复时 O(1) 校验聊天树かどうか重建 */
   count: number;
 }
 
 /**
- * 捕获滚动锚点：记录视口顶行相对最近 prompt 边界的位置。
+ * スクロールアンカーをキャプチャ：ビューポート先頭行の直近の prompt 境界に対する位置を記録。
  * @param lines 完整拍平内容行（getViewportState().lines）
- * @param scrollTop 视口顶行的绝对行号
- * @returns 行数组为空或全文无 prompt 时返回 null（无法建立锚点）
+ * @param scrollTop ビューポート顶行的绝对行号
+ * @returns 行数组为空或全文无 prompt 时返す null（无法建立锚点）
  */
 export function captureAnchor(lines: string[] | null, scrollTop: number): ScrollAnchor | null {
   if (!lines || lines.length === 0) return null;
@@ -591,15 +591,15 @@ export function captureAnchor(lines: string[] | null, scrollTop: number): Scroll
 }
 
 /**
- * 计算恢复目标行（统一 clamp 模型：scrollTop' = clamp(base + d', 0, maxTop)，见 plan §5）。
+ * 計算恢复目标行（统一 clamp 模型：scrollTop' = clamp(base + d', 0, maxTop)，见 plan §5）。
  *
- * 先做 O(1) 结构校验：prompt 总数与捕获时不一致说明聊天树已重建，放弃恢复。
+ * 先做 O(1) 结构校验：prompt 总数与キャプチャ时不一致说明聊天树已重建，放弃恢复。
  * d 截断顺序：先夹进所在段（不超过下个 prompt），再整体夹进 [0, maxTop]——
  * 保证目标要么精确还原、要么落在同一问答边界内、要么贴底且仍在屏内。
  *
  * @param newLines 变更后的完整内容行
  * @param anchor 之前 captureAnchor 的产物
- * @param vh 视口高度（计算 maxTop 用）
+ * @param vh ビューポート高度（計算 maxTop 用）
  * @returns null 表示放弃恢复（结构变化或输入无效）；否则为绝对目标行号
  */
 export function computeRestoreRow(newLines: string[] | null, anchor: ScrollAnchor, vh: number): number | null {
@@ -627,11 +627,11 @@ export function computeRestoreRow(newLines: string[] | null, anchor: ScrollAncho
 export interface ScrollRestoreMonitorOptions {
   /** 发起时的代际号；轮询期间不一致说明有新的高度变更动作，立即放弃 */
   generation: number;
-  /** 当前代际号读取器 */
+  /** 当前代际号読み取り器 */
   getGeneration: () => number;
-  /** 当前帧对象读取器（currentLayout 引用，换代即证明发生重排） */
+  /** 当前帧对象読み取り器（currentLayout 引用，换代即证明发生重排） */
   getFrame: () => unknown;
-  /** 当前内容高度读取器 */
+  /** 当前内容高度読み取り器 */
   getContentHeight: () => number;
   /** 布局稳定后的恢复回调（至多触发一次） */
   onRestore: () => void;
@@ -647,7 +647,7 @@ export interface ScrollRestoreMonitorOptions {
 /**
  * 恢复监视器：等布局稳定后执行一次恢复回调（plan §6 步骤③）。
  * 三重条件：generation 未变、currentLayout 帧代际变化、contentHeight 连续两个新帧相同。
- * 轮询默认 16ms/tick、上限 20 次，超限静默放弃（与包内降级策略一致）。
+ * 轮询默认 16ms/tick、上限 20 次，超限静默放弃（与包内フォールバック策略一致）。
  */
 export class ScrollRestoreMonitor {
   private timer: ReturnType<typeof setTimeout> | undefined;
@@ -798,7 +798,7 @@ export function getNavConfigCached(): NavConfig {
 }
 
 /**
- * 需求 A：模式切换时是否自动展开/收拢工具输出（plan §9.1）。
+ * 需求 A：模式切换时かどうか自动展开/收拢工具输出（plan §9.1）。
  * 默认 false：保持工具状态不动，进出阅读位置天然无损；true 为显式选择，
  * 展开动作走锚点包装补偿位置。VITEST 空配置同样走此兑底，防测试基线漂移。
  */
@@ -855,7 +855,7 @@ export class GgSequence {
   private lastAt = 0;
   private timer: ReturnType<typeof setTimeout> | undefined;
   constructor(private winMs = 500) {}
-  /** 记录一次 g；返回 true 表示 winMs 内双击命中（顶部） */
+  /** 記録一次 g；返す true 表示 winMs 内双击命中（顶部） */
   press(now = Date.now()): boolean {
     const hit = now - this.lastAt < this.winMs;
     this.clearTimer();
@@ -981,7 +981,7 @@ export class ScrollReaderEditor extends CustomEditor {
 }
 
 /** 只读编辑器：READING 时完全覆盖原 input 位置，居中显示 ◉ Reading，无边框。
- *  搜索输入态时同位置显示 Search: <query> (n/m)，替换式常驻、不堆叠。 */
+ *  検索输入态时同位置显示 Search: <query> (n/m)，替换式常驻、不堆叠。 */
 export class ReadonlyEditor extends CustomEditor {
   private readonly accent: (s: string) => string;
   private readonly searchUiRef?: { mode: boolean; query: string; idx: number; total: number };
@@ -1028,11 +1028,11 @@ export default function (pi: ExtensionAPI) {
   let latestTui: TUI | undefined;
   // 需求 B：最近一次 factory 收到的应用级 keybindings（terminal 通道回调无 kb 入参，需在外层记账）
   let latestKb: any;
-  // 工具展开状态本地镜像：核心 ui context 无读取 getter，扩展发起的每次变更在此记账；
+  // 工具展开状态本地镜像：核心 ui context 无読み取り getter，扩展发起的每次变更在此记账；
   // null 表示尚未得知（首次推导规则见 applyReaderUI）。已知限制：编辑态由核心路径
   // （actionHandler 等）切换工具输出时镜像不感知会漂移，进入 READING 后即重新对齐。
   let toolsExpandedMirror: boolean | null = null;
-  // 滚动恢复代际号：每次新的高度变更动作递增，作废在途监视器（防快速连按竞态）
+  // スクロール恢复代际号：每次新的高度变更动作递增，作废在途监视器（防快速连按竞态）
   let scrollGen = 0;
   let offTerminalInput: (() => void) | undefined;
   // inputListener 只安装一次：mainFactory 退出阅读恢复时会再次被调用，防止重复拦截。
@@ -1040,7 +1040,7 @@ export default function (pi: ExtensionAPI) {
   // reader 自己创建的最新编辑器实例（两个工厂都要登记）；不能用 instanceof——
   // jiti 模块边界下会失效，核心自己也用 duck typing
   let currentReaderEditor: object | undefined;
-  // reader 自有的帮助 overlay 组件引用（dialogOpen 豁免用）
+  // reader 自有的ヘルプ overlay 组件引用（dialogOpen 豁免用）
   let currentHelpComponent: object | undefined;
   const gg = new GgSequence(300); // gg 300ms 双击（100ms 过短易失效）
   const countBuf = new CountBuffer(800);
@@ -1048,7 +1048,7 @@ export default function (pi: ExtensionAPI) {
   // 上次语义跳目标（5s 有效，用于 [q/]q 连续步进）
   let lastSemanticRow: number | null = null;
   let lastSemanticAt = 0;
-  // 搜索状态机：INACTIVE(无) -> INPUT(/后全量接收) -> NAV(enter后仅?快捷键)
+  // 検索ステートマシン：INACTIVE（なし） -> INPUT（/ 後に全量受信） -> NAV（enter 後に ? ショートカットのみ）
   let searchMode: SearchMode = SearchMode.INACTIVE;
   // 双通道去重：同一 data 在极短时间重复到达只处理一次
   let lastNavData = "";
@@ -1088,10 +1088,10 @@ export default function (pi: ExtensionAPI) {
   };
 
   /**
-   * 焦点被非 reader 组件持有时为真（扩展弹窗/ui.input/ui.custom 等一切夺焦场景），
-   * 此时 reader 必须让路。探测为每键实时焦点比对（非快照）：链式弹窗
-   * （select → input 换组件）也能正确感知。豁免 reader 自有的编辑器、帮助组件
-   * 与搜索输入组件，不依赖「overlay.hide 同步还原 preFocus」的隐式时序。
+   * フォーカスが非 reader コンポーネントに保持されている場合に真（拡張ダイアログ/ui.input/ui.custom など全ての奪取シーン）、
+   * このとき reader は譲らなければならない。検出はキーごとのリアルタイムなフォーカス比較（スナップショットではない）：連鎖ダイアログ
+   * （select → input 换组件）也能正确感知。豁免 reader 自有的编辑器、ヘルプ组件
+   * 与検索输入组件，不依赖「overlay.hide 同步还原 preFocus」的隐式时序。
    */
   const dialogOpen = (): boolean => {
     try {
@@ -1104,8 +1104,8 @@ export default function (pi: ExtensionAPI) {
     } catch { return false; }
   };
 
-  // 搜索进度显示在底部输入栏（ReadonlyEditor）固定位置替换，不用 flash。
-  // 搜索阶段常驻显示 Search，直到 esc 取消，不做节流切回 Reading。
+  // 検索进度显示在底部输入栏（ReadonlyEditor）固定位置替换，不用 flash。
+  // 検索阶段常驻显示 Search，直到 esc 取消，不做节流切回 Reading。
   const searchUi = { mode: false, query: "", idx: -1, total: 0 };
 
   const clearSearchUi = (): void => {
@@ -1115,7 +1115,7 @@ export default function (pi: ExtensionAPI) {
     searchUi.total = 0;
   };
 
-  /** 关闭搜索栏并取消高亮，重置状态机，留在 READING */
+  /** 关闭検索栏并取消高亮，重置状态机，留在 READING */
   const closeSearchAndReset = (tui: any): void => {
     try { (tui as any)?.closeSearch?.(); } catch {}
     searchMode = SearchMode.INACTIVE;
@@ -1147,11 +1147,11 @@ export default function (pi: ExtensionAPI) {
   };
 
   /**
-   * 搜索输入阶段（/ 到 enter）：接收所有输入直到 enter
+   * 検索输入阶段（/ 到 enter）：接收所有输入直到 enter
    * - enter: 提交 -> NAV (高亮保留，n/N 接管) 或空查询则直接 INACTIVE
    * - esc: 取消 -> closeSearch 取消高亮，回到 READING
    * - 其他: 全部喂给官方 Input（含 j/k、退格、粘贴等）
-   * 返回 true 表示已消费
+   * 返す true 表示已消费
    */
   const handleSearchInput = (d: string, tui: any, source: "input" | "terminal"): boolean | undefined => {
     if (searchMode !== SearchMode.INPUT) return undefined;
@@ -1190,7 +1190,7 @@ export default function (pi: ExtensionAPI) {
       return true;
     }
     if (isEscKey(d)) {
-      // esc 有搜索栏就关闭取消高亮，留在 READING
+      // esc 有検索栏就关闭取消高亮，留在 READING
       closeSearchAndReset(tui);
       return true;
     }
@@ -1394,7 +1394,7 @@ export default function (pi: ExtensionAPI) {
       const ok = countBuf.push(data);
       return true && (ok || true);
     }
-    // 搜索：/ 进入 INPUT（全量接收），n/N 在 NAV/有搜索时导航
+    // 検索：/ 进入 INPUT（全量接收），n/N 在 NAV/有検索时导航
     if (data === "/") {
       const opened = proxySearchOpen(tui);
       if (opened) {
@@ -1406,7 +1406,7 @@ export default function (pi: ExtensionAPI) {
       return false;
     }
     if (data === "n") {
-      // 仅 NAV 或存在 activeSearch 时有效，避免无搜索时误触发
+      // 仅 NAV 或存在 activeSearch 时有效，避免无検索时误触发
       if (searchMode === SearchMode.NAV || hasActiveSearch(tui)) {
         proxySearchNavigate(tui, 1);
         countBuf.reset();
@@ -1443,7 +1443,7 @@ export default function (pi: ExtensionAPI) {
     return false;
   };
 
-  // ? 帮助弹窗内容：key 列 + 描述列，统一固定宽度对齐，保证盒子整齐可读
+  // ? ヘルプポップアップ内容：key 列 + 説明列、固定幅で整列させボックスを整然と読みやすくする
   const getHelpEntries = (): Array<[string, string]> => {
     const toggle = getActiveToggleLabel();
     const entries: Array<[string, string]> = [
@@ -1472,7 +1472,7 @@ export default function (pi: ExtensionAPI) {
   };
 
   let helpOpen = false;
-  // 帮助 overlay 的关闭入口（done 回调包装）：供 esc 路径与弹窗期守卫共用
+  // ヘルプ overlay のクローズ入口（done コールバックのラップ）：esc パスとダイアログ期間のガードで共用
   let helpClose: (() => void) | undefined;
   const showHelp = () => {
     if (helpOpen) return;
@@ -1524,7 +1524,7 @@ export default function (pi: ExtensionAPI) {
         invalidate: () => {},
         focused: true,
       } as any;
-      // 登记 reader 自有 overlay 组件引用与关闭入口（dialogOpen 焦点比对豁免 / 弹窗期 esc 先关帮助）
+      // reader 所有の overlay コンポーネント参照とクローズ入口を登録（dialogOpen のフォーカス比較除外 / ダイアログ期間は esc で先にヘルプを閉じる）
       currentHelpComponent = comp;
       helpClose = () => {
         if (!helpOpen) return;
@@ -1545,13 +1545,13 @@ export default function (pi: ExtensionAPI) {
     });
   };
 
-  // 滚动恢复代际号递增：作废在途监视器，返回新号
+  // スクロール恢复代际号递增：作废在途监视器，返す新号
   const advanceScrollGen = (): number => {
     scrollGen += 1;
     return scrollGen;
   };
 
-  /** 守卫链捕获（plan §6）：scrollView 存在？lines 存在？非贴底跟随态？任一失败返回 null */
+  /** 守卫链キャプチャ（plan §6）：scrollView 存在？lines 存在？非贴底跟随态？任一失败返す null */
   const tryCaptureAnchor = (): ScrollAnchor | null => {
     try {
       const tui: any = latestTui;
@@ -1589,20 +1589,20 @@ export default function (pi: ExtensionAPI) {
             if (target === null || !vs.scrollView) return;
             vs.scrollView.scrollTo(target, { disableFollow: true });
             cur.requestRender?.();
-          } catch { /* 静默降级 */ }
+          } catch { /* 静默フォールバック */ }
         },
       }).start();
-    } catch { /* 静默降级 */ }
+    } catch { /* 静默フォールバック */ }
   };
 
   /**
-   * 扩展侧统一的工具展开变更入口：镜像记账 + 锚点保位（先捕获再变更）。
+   * 扩展侧统一的工具展开变更入口：镜像记账 + 锚点保位（先キャプチャ再变更）。
    * applyReaderUI 的自动展开/收拢与 §9.2 阅读态手动分支都必须走这里。
    */
   const toggleToolsExpandedWithAnchor = (notify?: (msg: string) => void): void => {
     const next = !(toolsExpandedMirror ?? false);
     advanceScrollGen();
-    // 必须在高度生效前同步捕获（setExpanded 在下一次 render 才改变行数）
+    // 必须在高度生效前同步キャプチャ（setExpanded 在下一次 render 才改变行数）
     const anchor = tryCaptureAnchor();
     try { currentCtx?.ui?.setToolsExpanded?.(next); } catch {}
     toolsExpandedMirror = next;
@@ -1625,7 +1625,7 @@ export default function (pi: ExtensionAPI) {
     const autoExpand = isAutoExpandToolsEnabled();
     // 镜像推导：首次未知时按“刚进入且 autoExpandTools=true → true，否则 false”（plan §9.4）
     toolsExpandedMirror = autoExpand ? reading : (toolsExpandedMirror ?? false);
-    // 捕获必须在任何高度变化之前同步完成（plan §6 约束 1）
+    // キャプチャ必须在任何高度变化之前同步完成（plan §6 约束 1）
     const anchor = tryCaptureAnchor();
     if (reading) {
       try { savedInput = ui.getEditorText?.() ?? ""; } catch { savedInput = ""; }
@@ -1648,25 +1648,25 @@ export default function (pi: ExtensionAPI) {
   };
 
   // toggle：只翻转状态 + 尽力应用 UI
-  /** @returns 是否实际翻转（外部弹窗持有焦点时被守卫拦截则返回 false） */
+  /** @returns 実際に反転したか（外部ダイアログがフォーカスを保持している場合はガードにブロックされ false を返す） */
   const toggle = (ctx?: ExtensionContext): boolean => {
     if (ctx) {
       currentCtx = ctx;
       ctxBroken = false;
     }
-    // 纵深防御：外部弹窗持有焦点时禁止切换——容器重建会让弹窗 promise 悬挂（Bug B）
+    // 多層防御：外部ダイアログがフォーカスを保持している場合は切替を禁止 — コンテナ再構築によりダイアログの promise が宙吊りになる（Bug B）
     if (dialogOpen()) return false;
     if (isReading) {
       gg.reset();
       countBuf.reset();
       bracketSeq.reset();
       helpOpen = false;
-      // 退出 reading 时若搜索还开着，一并关闭恢复视图
+      // 退出 reading 时若検索还开着，一并关闭恢复视图
       try { (latestTui as any)?.closeSearch?.(); } catch {}
       searchMode = SearchMode.INACTIVE;
       clearSearchUi();
     } else {
-      // 进入 reading 时确保搜索状态干净
+      // 进入 reading 时确保検索状态干净
       searchMode = SearchMode.INACTIVE;
       clearSearchUi();
     }
@@ -1675,7 +1675,7 @@ export default function (pi: ExtensionAPI) {
     return true;
   };
 
-  /** esc 统一处理：有搜索栏就关闭取消高亮，留在 READING；无搜索才退出 READING */
+  /** esc 统一处理：有検索栏就关闭取消高亮，留在 READING；无検索才退出 READING */
   const handleEsc = (tui: any): boolean => {
     if (searchMode === SearchMode.INPUT || searchMode === SearchMode.NAV || hasActiveSearch(tui)) {
       closeSearchAndReset(tui);
@@ -1784,7 +1784,7 @@ export default function (pi: ExtensionAPI) {
     isReading = false;
     helpOpen = false;
     listenerInstalled = false;
-    // 弹窗探测基准重置：不依赖「resetExtensionUI 清 listener → 工厂先行重登」的间接时序
+    // ダイアログ検出基準をリセット：「resetExtensionUI が listener をクリア → ファクトリが先に再登録する」という間接的なタイミングに依存しない
     currentReaderEditor = undefined;
     currentHelpComponent = undefined;
     helpClose = undefined;
@@ -1798,7 +1798,7 @@ export default function (pi: ExtensionAPI) {
     // 新会话聊天树重建，工具展开回到核心默认（收拢）；作废在途恢复监视器
     toolsExpandedMirror = false;
     advanceScrollGen();
-    // 配置常驻缓存，reload / 新会话时重新读取
+    // 配置常驻缓存，reload / 新会话时重新読み取り
     __resetNavConfigCacheForTest();
     try {
       ctx.ui.setEditorComponent((tui, theme, kb) => {
@@ -1821,14 +1821,14 @@ export default function (pi: ExtensionAPI) {
   const cmdHandler = async (_args: string, ctx: ExtensionContext) => {
     const applied = toggle(ctx);
     if (!applied) {
-      // 纵深防御路径（弹窗持焦时命令输入天然不可达）：不宣称未发生的状态翻转
+      // 多層防御パス（ダイアログがフォーカスを保持している場合はコマンド入力はそもそも到達不能）：発生していない状態遷移を宣言しない
       const label = getActiveToggleLabel();
-      ctx.ui.notify(`外部弹窗持有焦点，已忽略 ${label} 阅读模式切换`, "info");
+      ctx.ui.notify(`外部ダイアログがフォーカスを保持しているため、無視しました ${label} リーディングモード切替`, "info");
       return;
     }
     const label = getActiveToggleLabel();
     ctx.ui.notify(isReading
-      ? `已进入阅读模式（${label} 切换）：ctrl-u/d 半页 f/b 整页 gg/G 顶底 j/k 行 esc/i 退出，? 帮助`
+      ? `已进入阅读模式（${label} 切换）：ctrl-u/d 半页 f/b 整页 gg/G 顶底 j/k 行 esc/i 退出，? ヘルプ`
       : "已退出阅读模式，恢复编辑", "info");
   };
   pi.registerCommand("reader", {

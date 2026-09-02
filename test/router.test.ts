@@ -8,9 +8,9 @@ import {
 } from "../src/index.ts";
 
 /**
- * 双渠道共用路由单测：依赖注入 fake tui 与可控状态。
- * 注意：不构造带 extensionSelector 的假对象——真实运行时该私有字段恒不可达，
- * 弹窗探测走 focusedComponent 引用比对，fake 只需提供可切换的 dialogOpen()。
+ * 二重チャネル共有ルーティングの単体テスト：依存性注入による fake tui と制御可能な状態。
+ * 注意：extensionSelector を持つ偽オブジェクトは構築しない — 実ランタイムではそのプライベートフィールドは常に到達不能、
+ * ダイアログ検出は focusedComponent の参照比較で行い、fake は切替可能な dialogOpen() を提供すればよい。
  */
 function makeHarness(overrides: Partial<ReadingRouterIO> = {}) {
   const state = {
@@ -70,40 +70,40 @@ function makeHarness(overrides: Partial<ReadingRouterIO> = {}) {
   };
 }
 
-describe("router: 外部弹窗夺焦期间（dialogOpen=true）", () => {
-  it("渠道 1：Enter/j/CSI Down/SSU Down/?/esc 全量透传（返回 undefined）", () => {
+describe("router: 外部ダイアログがフォーカスを奪っている期間（dialogOpen=true）", () => {
+  it("チャネル1：Enter/j/CSI Down/SSU Down/?/esc は全てパススルー（undefined を返す）", () => {
     const h = makeHarness();
     h.state.dialogOpen = true;
     for (const d of ["\r", "j", "k", "\x1b[B", "\x1bOB", "?", "\x1b"]) {
       expect(h.term(d)).toBeUndefined();
     }
-    // 未产生任何阅读副作用
+    // リーディングの副作用は一切発生しない
     expect(h.calls.toggle).not.toHaveBeenCalled();
     expect(h.calls.handleEsc).not.toHaveBeenCalled();
     expect(h.calls.showHelp).not.toHaveBeenCalled();
     expect(h.tui.scrollBy).not.toHaveBeenCalled();
   });
 
-  it("渠道 1：toggle 键被消费屏蔽，但不翻转 isReading、不触发任何 UI 切换（防 Bug B）", () => {
+  it("チャネル1：toggle キーは消費してブロック、ただし isReading は反転せず UI 切替も発火しない（Bug B 防止）", () => {
     const h = makeHarness();
     h.state.dialogOpen = true;
-    // VITEST 下 toggle 固定 alt+o
+    // VITEST 下では toggle は alt+o に固定
     expect(h.term("\x1bo")).toEqual({ consume: true });
     expect(h.calls.toggle).not.toHaveBeenCalled();
     expect(h.state.isReading).toBe(true);
-    // Kitty 协议序列同样屏蔽
+    // Kitty プロトコルシーケンスも同様にブロック
     expect(h.term("\u001b[111;3u")).toEqual({ consume: true });
     expect(h.calls.toggle).not.toHaveBeenCalled();
   });
 
-  it("渠道 2：toggle 键也全量透传（让渡渠道 1，不本地消费）", () => {
+  it("チャネル2：toggle キーも全てパススルー（チャネル1に譲渡、ローカルで消費しない）", () => {
     const h = makeHarness();
     h.state.dialogOpen = true;
     expect(h.input("\x1bo")).toBeUndefined();
     expect(h.calls.toggle).not.toHaveBeenCalled();
   });
 
-  it("渠道 2：SEARCH_INPUT 态下字符同样透传给弹窗（守卫优先于搜索态）", () => {
+  it("チャネル2：SEARCH_INPUT 状態でも文字は同様にダイアログへパススルー（ガードが検索状態より優先）", () => {
     const h = makeHarness();
     h.state.dialogOpen = true;
     h.state.searchMode = SearchMode.INPUT;
@@ -114,21 +114,21 @@ describe("router: 外部弹窗夺焦期间（dialogOpen=true）", () => {
   });
 });
 
-describe("router: 无弹窗正常路径（回归）", () => {
-  it("渠道 1：toggle 正常切换且消费", () => {
+describe("router: ダイアログなし通常パス（リグレッション）", () => {
+  it("チャネル1：toggle は正常に切替えて消費", () => {
     const h = makeHarness();
     expect(h.term("\x1bo")).toEqual({ consume: true });
     expect(h.calls.toggle).toHaveBeenCalledTimes(1);
     expect(h.state.isReading).toBe(false);
   });
 
-  it("渠道 2：toggle 让渡渠道 1（返回 undefined，不重复切换）", () => {
+  it("チャネル2：toggle はチャネル1に譲渡（undefined を返し、二重切替しない）", () => {
     const h = makeHarness();
     expect(h.input("\x1bo")).toBeUndefined();
     expect(h.calls.toggle).not.toHaveBeenCalled();
   });
 
-  it("READING 下 j/k 行级滚动 + count 前缀生效", () => {
+  it("READING 下で j/k 行スクロール + count プレフィックスが有効", () => {
     const h = makeHarness({ countPeek: () => 5 });
     expect(h.term("j")).toEqual({ consume: true });
     expect(h.tui.scrollBy).toHaveBeenLastCalledWith(5);
@@ -136,26 +136,26 @@ describe("router: 无弹窗正常路径（回归）", () => {
     expect(h.tui.scrollBy).toHaveBeenLastCalledWith(-5);
   });
 
-  it("§3.3：application cursor keys 的 SSU 方向键序列透传（\\x1bO 前缀）", () => {
+  it("§3.3：application cursor keys の SSU 方向キーシーケンス透過（\\x1bO プレフィックス）", () => {
     const h = makeHarness();
-    // Down/Up 在 application cursor keys 模式为 \x1bOB/\x1bOA，应透传给焦点组件而非被吞
+    // Down/Up は application cursor keys モードでは \x1bOB/\x1bOA となり、フォーカスコンポーネントへパススルーすべきで消費されてはならない
     expect(h.term("\x1bOB")).toBeUndefined();
     expect(h.term("\x1bOA")).toBeUndefined();
-    // CSI 序列照旧透传
+    // CSI シーケンスは従来通りパススルー
     expect(h.term("\x1b[B")).toBeUndefined();
-    // 多字节非 CSI/SSU 序列仍消费，避免泄漏进核心
+    // 複数バイトの非 CSI/SSU シーケンスは依然として消費し、コアへの漏洩を防ぐ
     expect(h.term("\x1bz")).toEqual({ consume: true });
   });
 
-  it("编辑态（isReading=false）：导航键不消费、不滚动", () => {
+  it("編集状態（isReading=false）：ナビゲーションキーは消費せずスクロールもしない", () => {
     const h = makeHarness();
     h.state.isReading = false;
-    expect(h.term("j")).toBeUndefined(); // 渠道 1 非阅读态只关心 toggle
-    expect(h.input("j")).toBeUndefined(); // 渠道 2 非阅读态透传
+    expect(h.term("j")).toBeUndefined(); // 渠道 1 非阅读态只閉心 toggle
+    expect(h.input("j")).toBeUndefined(); // チャネル2は非リーディング状態でパススルー
     expect(h.tui.scrollBy).not.toHaveBeenCalled();
   });
 
-  it("?：渠道 2 让渡，渠道 1 打开帮助并消费；helpOpen 时两渠道早退", () => {
+  it("?：チャネル2は譲渡、チャネル1はヘルプを開いて消費；helpOpen 時は両チャネルとも早期リターン", () => {
     const h = makeHarness();
     expect(h.input("?")).toBeUndefined();
     expect(h.calls.showHelp).not.toHaveBeenCalled();
@@ -166,7 +166,7 @@ describe("router: 无弹窗正常路径（回归）", () => {
     expect(h.input("?")).toBeUndefined();
   });
 
-  it("esc 二义：无搜索时经 handleEsc 走退出；i 在 NAV 态先清搜索留在 READING", () => {
+  it("esc の二義性：検索なし時は handleEsc 経由で終了；i は NAV 状態で検索をクリアして READING に留まる", () => {
     const h = makeHarness();
     expect(h.term("\x1b")).toEqual({ consume: true });
     expect(h.calls.handleEsc).toHaveBeenCalledTimes(1);
@@ -183,7 +183,7 @@ describe("router: 无弹窗正常路径（回归）", () => {
     expect(h.calls.toggle).toHaveBeenCalledTimes(1);
   });
 
-  it("SEARCH_INPUT：两渠道全量交给 handleSearchInput；未消费则透传", () => {
+  it("SEARCH_INPUT：両チャネルとも handleSearchInput に委譲；消費されなければパススルー", () => {
     const h = makeHarness();
     h.state.searchMode = SearchMode.INPUT;
     expect(h.term("a")).toEqual({ consume: true });
@@ -196,7 +196,7 @@ describe("router: 无弹窗正常路径（回归）", () => {
     expect(h2.term("a")).toBeUndefined();
   });
 
-  it("gg 同批连发直达顶部；单个 g 等待双击仅消费不滚动", () => {
+  it("gg は同バッチ連発で先頭へ直行；単一 g はダブルクリック待ちで消費のみ、スクロールなし", () => {
     const h = makeHarness();
     expect(h.term("gg")).toEqual({ consume: true });
     expect(h.tui.scrollToTop).toHaveBeenCalledTimes(1);
@@ -204,7 +204,7 @@ describe("router: 无弹窗正常路径（回归）", () => {
     expect(h.tui.scrollToTop).toHaveBeenCalledTimes(1);
   });
 
-  it("G 底部 / ctrl-u 半页", () => {
+  it("G 末尾 / ctrl-u 半ページ", () => {
     const h = makeHarness();
     expect(h.term("G")).toEqual({ consume: true });
     expect(h.tui.scrollToBottom).toHaveBeenCalledTimes(1);
@@ -212,20 +212,20 @@ describe("router: 无弹窗正常路径（回归）", () => {
     expect(h.tui.scrollBy).toHaveBeenLastCalledWith(-10);
   });
 
-  it("去重命中：直接消费且不再触发滚动/语义导航", () => {
+  it("重複排除ヒット：直接消費しスクロール/セマンティックナビゲーションは発火しない", () => {
     const h = makeHarness({ isDuplicateNav: () => true });
     expect(h.term("j")).toEqual({ consume: true });
     expect(h.tui.scrollBy).not.toHaveBeenCalled();
     expect(h.calls.semanticNav).not.toHaveBeenCalled();
   });
 
-  it("app.tools.expand 命中：触发工具展开并消费", () => {
+  it("app.tools.expand ヒット：ツール展開を発火して消費", () => {
     const h = makeHarness({ matchesExpand: (d) => d === "\x0f" });
     expect(h.term("\x0f")).toEqual({ consume: true });
     expect(h.calls.expand).toHaveBeenCalledTimes(1);
   });
 
-  it("语义导航命中即消费", () => {
+  it("セマンティックナビゲーションヒットで即消費", () => {
     const semNav = vi.fn((d: string) => d === "/");
     const h = makeHarness({ trySemanticNav: semNav });
     expect(h.term("/")).toEqual({ consume: true });
@@ -234,7 +234,7 @@ describe("router: 无弹窗正常路径（回归）", () => {
     expect(h.tui.scrollBy).not.toHaveBeenCalled();
   });
 
-  it("非 INPUT 态不进入搜索处理分支（NAV/INACTIVE 均不调 handleSearchInput）", () => {
+  it("非 INPUT 状態では検索処理分岐に入らない（NAV/INACTIVE ともに handleSearchInput を呼ばない）", () => {
     const h = makeHarness();
     for (const mode of [SearchMode.NAV, SearchMode.INACTIVE]) {
       h.state.searchMode = mode;
@@ -244,25 +244,25 @@ describe("router: 无弹窗正常路径（回归）", () => {
     expect(h.calls.searchInput).not.toHaveBeenCalled();
   });
 
-  it("多字符粘贴块：渠道 2 单字节逐个消费，非 CSI 多字节消费", () => {
+  it("複数文字のペーストブロック：チャネル2は単バイトを個別に消費、非 CSI の複数バイトも消費", () => {
     const h = makeHarness();
     expect(h.input("abc")).toEqual({ consume: true });
     expect(h.input("\x02\x05")).toEqual({ consume: true });
   });
 
-  it("帮助+弹窗并存：帮助逻辑上也在最上——esc 关帮助，其余键全部承接不透传", () => {
+  it("ヘルプ+ダイアログ共存：ヘルプは論理的に最前面 — esc でヘルプを閉じ、その他のキーは全て受け止めてパススルーしない", () => {
     const h = makeHarness();
     h.state.helpOpen = true;
     h.state.dialogOpen = true;
-    // esc → 关帮助（消费），不触碰弹窗、不退阅读
+    // esc → ヘルプを閉じる（消費）、ダイアログには触れずリーディングも終了しない
     expect(h.term("\x1b")).toEqual({ consume: true });
     expect(h.state.helpOpen).toBe(false);
     expect(h.calls.handleEsc).not.toHaveBeenCalled();
     expect(h.calls.toggle).not.toHaveBeenCalled();
-    // 帮助已关、弹窗仍在：再按 esc 透传给弹窗（不退阅读）
+    // ヘルプは閉じたがダイアログはまだある：再度 esc をダイアログへパススルー（リーディングは終了しない）
     expect(h.term("\x1b")).toBeUndefined();
     expect(h.calls.toggle).not.toHaveBeenCalled();
-    // 并存期间：j/enter 等被帮助层承接（不下漏到看不见的弹窗），toggle 同样被吞
+    // 共存期間：j/enter などはヘルプ層で受け止め（見えないダイアログへは漏らさない）、toggle も同様に消費される
     h.state.helpOpen = true;
     expect(h.term("j")).toEqual({ consume: true });
     expect(h.term("\r")).toEqual({ consume: true });
@@ -270,7 +270,7 @@ describe("router: 无弹窗正常路径（回归）", () => {
     expect(h.calls.toggle).not.toHaveBeenCalled();
   });
 
-  it("帮助+弹窗并存仅限渠道 1 承接按键；渠道 2 全量透传（由渠道 1 消费兜底）", () => {
+  it("ヘルプ+ダイアログ共存はチャネル1のみがキーを受け止める；チャネル2は全てパススルー（チャネル1の消費で担保）", () => {
     const h = makeHarness();
     h.state.helpOpen = true;
     h.state.dialogOpen = true;
@@ -279,42 +279,42 @@ describe("router: 无弹窗正常路径（回归）", () => {
 });
 
 describe("hasActiveSearch", () => {
-  it("activeSearch 存在判定，异常降级 false", () => {
+  it("activeSearch 存在判定、例外時は false にフォールバック", () => {
     expect(hasActiveSearch({ activeSearch: { query: "x" } })).toBe(true);
     expect(hasActiveSearch({})).toBe(false);
     expect(hasActiveSearch(null)).toBe(false);
   });
 });
 
-describe("isForeignFocus（dialogOpen 判定本体，fake tui 注入 focusedComponent）", () => {
+describe("isForeignFocus（dialogOpen 判定本体、fake tui に focusedComponent を注入）", () => {
   const editor = { id: "reader-editor" };
   const help = { id: "help-overlay" };
   const searchComp = { id: "search-input" };
   const own = { editor, help, searchComponent: searchComp };
 
-  it("焦点为空（undefined/null）→ false（无法判定时不拦截任何键）", () => {
+  it("フォーカスが空（undefined/null）→ false（判定不能時はどのキーもインターセプトしない）", () => {
     expect(isForeignFocus(undefined, own)).toBe(false);
     expect(isForeignFocus(null, own)).toBe(false);
   });
 
-  it("焦点是 reader 编辑器 → false（基层正常态）", () => {
+  it("フォーカスが reader エディタ → false（ベースの正常状態）", () => {
     expect(isForeignFocus(editor, own)).toBe(false);
   });
 
-  it("三重豁免：帮助 overlay / 搜索输入组件 → false", () => {
+  it("三重除外：ヘルプ overlay / 検索入力コンポーネント → false", () => {
     expect(isForeignFocus(help, own)).toBe(false);
     expect(isForeignFocus(searchComp, own)).toBe(false);
   });
 
-  it("焦点是外部组件（扩展弹窗/输入框等夺焦场景）→ true", () => {
+  it("フォーカスが外部コンポーネント（拡張ダイアログ/入力ボックスなどの奪取シーン）→ true", () => {
     expect(isForeignFocus({ id: "extension-selector" }, own)).toBe(true);
-    // 链式弹窗换组件后仍是外部组件（select → input 同层切换）
+    // 連鎖ダイアログでコンポーネントを切り替えた後も依然として外部コンポーネント（select → input の同層切替）
     expect(isForeignFocus({ id: "extension-input" }, own)).toBe(true);
   });
 
-  it("引用比对而非结构比对：同形对象不相等；豁免字段缺省时同样生效", () => {
-    expect(isForeignFocus({ id: "reader-editor" }, own)).toBe(true); // 结构相同但引用不同
-    expect(isForeignFocus(help, {})).toBe(true); // 未登记豁免则视为外部
+  it("参照比較であり構造比較ではない：同形オブジェクトは不一致とする；免除フィールド未指定時も同様に有効", () => {
+    expect(isForeignFocus({ id: "reader-editor" }, own)).toBe(true); // 構造は同じだが参照が異なる
+    expect(isForeignFocus(help, {})).toBe(true); // 免除が未登録の場合は外部とみなす
     expect(isForeignFocus(searchComp, { editor })).toBe(true);
   });
 });

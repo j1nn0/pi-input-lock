@@ -1,5 +1,8 @@
 # Changelog
 
+## [0.1.0] - 2026-09-02
+
+- chore: promote the extension to standalone `@j1nn0/pi-input-lock`; reading-mode behavior remains unchanged and is based on `@inobit/pi-reader`.
 ## [0.3.2] - 2026-08-24
 
 - fix: extension dialogs (e.g. a permission ask via `ctx.ui.select`) were frozen while READING was active, and toggling reading mode away made the dialog vanish without resolving its promise — the pending tool call hung forever (agent stuck on "Working...")
@@ -12,11 +15,11 @@
   - Help overlay + dialog coexistence: the help overlay visually covers the dialog but lost focus to it, so while both are open the reader treats help as logically topmost — it swallows every key except Esc (matching its normal esc-only behavior; nothing leaks to the invisible dialog), and Esc closes the help (overlay hide only restores focus when it holds it, so the dialog keeps focus). Keys start reaching the dialog only after the help is closed
   - Testability seam: dual-channel key routing extracted into injectable factory `createReadingKeyRouter(io, source)` (+25 unit tests incl. dialog-open passthrough/blocking matrix and direct tests of the `isForeignFocus` detection core); dead `patchSearchTitle` helper removed
   - `/reader` command no longer announces a mode flip that was suppressed by the dialog guard
-  - docs: README (en/zh) rewritten for the new defaults and dialog-coexistence behavior; package AGENTS.md now records the layering/focus-stack design constraints
+  - docs: README (en/ja) rewritten for the new defaults and dialog-coexistence behavior; package AGENTS.md now records the layering/focus-stack design constraints
 
 ## [0.3.1] - 2026-08-23
 
-- docs: README cleanup (en + zh-CN synced) — drop the redundant `app.tools.expand` keybinding section and the `config.json` gitignore note; remove the internal planning doc `plan.md` from the repo, no runtime changes
+- docs: README cleanup (en + ja synced) — drop the redundant `app.tools.expand` keybinding section and the `config.json` gitignore note; remove the internal planning doc `plan.md` from the repo, no runtime changes
 
 ## [0.3.0] - 2026-08-23
 

@@ -21,4 +21,4 @@ logs/
 # 构建产物
 coverage/
 
-packages/pi-permission/config.json
+config.json

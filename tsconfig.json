@@ -17,5 +17,6 @@
     "declaration": false,
     "sourceMap": false,
     "noEmit": true
-  }
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "index.ts"]
 }

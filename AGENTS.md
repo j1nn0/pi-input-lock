@@ -1,52 +1,36 @@
-# @inobit/pi-packages
+# @j1nn0/pi-input-lock
 
-Pi coding agent 扩展包的 pnpm monorepo。所有包面向 `@earendil-works/pi-coding-agent` 0.84.2+，扩展经 jiti 直载、无需编译。
+Pi coding agent 的独立扩展包，面向 `@earendil-works/pi-coding-agent` 0.84.2+，经 jiti 直载，无需编译。当前阶段只完成从 monorepo 提升为单包；现有阅读模式行为保持不变，后续再演进输入锁语义。
 
 ## 技术栈
 
-- Node >=24 · pnpm 11.22.0（`packageManager` 锁定）
-- TypeScript ^6.0.3（仅 `tsc --noEmit` 类型检查，无构建产物）
+- Node >=24 · pnpm 11.22.0（由 `packageManager` 锁定）
+- TypeScript ^7.0.0（仅 `tsc --noEmit` 类型检查，无构建产物）
 - vitest ^4.1.8（仅 devDependency）
-- 运行时零第三方依赖（仅 peerDependencies 声明 pi 核心包）
+- 运行时零第三方依赖；Pi 核心包只在 `peerDependencies` 声明
 
 ## 结构
 
-- `pnpm-workspace.yaml`：`packages/*` 工作区 + catalog 版本中心
-- `tsconfig.base.json`：公共 TS 配置，子包 tsconfig extends 此文件
-- `packages/<pkg>/`：每个扩展包一个目录，独立发布
+- `package.json`：发布元数据、Pi 入口和脚本
+- `index.ts`：根入口，转出 `src/index.ts`
+- `src/index.ts`：阅读模式扩展的全部实现
+- `test/`：阅读与按键路由测试
+- `config.json`：本地/安装目录的可选配置（被 `.gitignore` 忽略）
 
 ## 常用命令
 
 ```bash
-pnpm install                              # 安装依赖
-pnpm check / pnpm test                    # 全仓类型检查 / 测试
-pnpm --filter @inobit/<pkg> check/test    # 单包检查/测试
-pnpm --filter @inobit/<pkg> pack:check    # 检查发布 tarball
-pi -ne -e ./packages/<pkg>   # 本地冒烟（免编译直载，--no-extensions 屏蔽已安装旧版，仅加载开发版）
+pnpm install
+pnpm check
+pnpm test
+pnpm pack:check
+pi -ne -e . --tui-mode fullscreen
 ```
 
-## 包约定
+## 目标与约束
 
-- 包命名 `@inobit/<pkg>`，`type: module`；`pi.extensions` 指向入口、`keywords` 含 `pi-package`、`publishConfig.access: public`
-- 依赖版本走 `pnpm-workspace.yaml` 的 catalog；跨包引用需显式 `workspace:` 协议（`linkWorkspacePackages: false`）
-- 每个包自带 README（安装/配置/集成）、CHANGELOG、AGENTS.md（包级上下文）
-- **文档分工（公共约定只维护一处）**：环境要求、catalog、常用命令、版本与发布（含 tag 规范）等公共约定一律只维护在本文件与根 README；
-  子包 `AGENTS.md` 只写目标（实现的功能）、`src/` 结构、常用命令与本包特有约束，不再重复公共约定；子包 `README.md` 面向快速了解与使用。
-
-## 版本与发布
-
-- **提交/发布前必须同步更新 `packages/<pkg>/package.json` 的 `version`**，否则无法发布（npm 不允许与已发布版本重复）。
-- 版本语义：`fix` → patch（`x.y.z` → `x.y.(z+1)`）；`feat` → minor；破坏性 → major。
-- 同一次修改中同步更新 `CHANGELOG.md`（用 `## [新版本] - YYYY-MM-DD` 格式在顶部新增条目）。
-- tag 格式：`包名/vx.y.z`（semver 版本号，如 `pi-permission/v0.1.2`）。
-
-## 包列表
-
-| 包 | 说明 |
-| -- | ---- |
-| `@inobit/pi-permission` | 轻量权限控制：敏感文件保护 / 项目边界读写区分 / 敏感操作确认 / plan-build 只读模式 |
-| `@inobit/pi-reader` | 阅读模式：`alt+o` 切换、`ctrl-u/d` 半页、`ctrl-f/b` 整页、`gg/G` 顶底、`?` 帮助 |
-| `@inobit/pi-todo` | 最小侵入任务清单：`todo` 工具 + `/todos` 命令 + 编辑器上方常驻面板，状态存会话分支可重放 |
-| `@inobit/pi-undo` | 撤销扩展：`/undo` + `alt+u`，单次/轮、队列感知、原子 abort 再撤 |
-| `@inobit/pi-retry` | 手动透明重试：`/retry` + `alt+r`，原样重新发起失败 turn，零提示词注入 |
-| `@inobit/pi-themes` | 精选主题包：Rosé Pine / TokyoNight / Catppuccin / Solarized 四族亮暗主题，支持 `theme: "亮/暗"` 配对自动切换 |
+- `INSERT` 态透传输入，`READING` 态通过 `TUI inputListener` 与 `ctx.ui.onTerminalInput` 双通道拦截按键。
+- 阅读模式支持 Vim 风格滚动、语义跳转、搜索、帮助浮层和 OSC133 prompt 序号锚定；修改路由行为时先补 `test/router.test.ts`。
+- `ScrollReaderEditor` 必须使用真实的 theme/keybindings 构造；不要用空对象替代运行时上下文。
+- 阶段 1 不改动 `src/index.ts` 的运行逻辑，不提前移除阅读模式功能，也不加入输入锁状态机。
+- 版本发布前同步更新 `package.json`、`CHANGELOG.md`；tag 使用 `v<version>`（如 `v0.1.0`）。

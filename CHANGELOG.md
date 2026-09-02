@@ -2,7 +2,8 @@
 
 ## [0.1.0] - 2026-09-02
 
-- chore: promote the extension to standalone `@j1nn0/pi-input-lock`; reading-mode behavior remains unchanged and is based on `@inobit/pi-reader`.
+- feat: add opt-in agent lifecycle integration for the input safety lock; `PI_INPUT_LOCK=1` enables automatic `IDLE`/`WATCH`/`OVERRIDE` transitions.
+  - Agent start enters `WATCH`, agent settled restores the editor and returns to `IDLE`; manual toggles switch `WATCH` and `OVERRIDE`.
 ## [0.3.2] - 2026-08-24
 
 - fix: extension dialogs (e.g. a permission ask via `ctx.ui.select`) were frozen while READING was active, and toggling reading mode away made the dialog vanish without resolving its promise — the pending tool call hung forever (agent stuck on "Working...")

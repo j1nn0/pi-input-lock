@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   isForeignFocus,
+  isEnabled,
   isLockedState,
   LockStateMachine,
   LockedEditor,
@@ -45,6 +46,8 @@ describe("lock state", () => {
 describe("toggle key", () => {
   it("matches the default shortcut and does not treat ordinary text as a command", () => {
     expect(matchesToggleKey("\x1bo")).toBe(true);
+    expect(matchesToggleKey("\x1b\x09")).toBe(true);
+    expect(matchesToggleKey("\x1b[105;6u")).toBe(true);
     expect(matchesToggleKey("o")).toBe(false);
     expect(matchesToggleKey("\x1b")).toBe(false);
   });
@@ -97,6 +100,7 @@ describe("extension preservation", () => {
     let component: any;
     let componentFactory: any;
     let editorText = "draft prompt";
+    let idle = true;
     let terminalRoute: ((data: string) => unknown) | undefined;
     const tui: any = {
       addInputListener: vi.fn(),
@@ -120,9 +124,13 @@ describe("extension preservation", () => {
           return () => { terminalRoute = undefined; };
         },
         notify: vi.fn(),
+        setStatus: vi.fn(),
       },
+      isIdle: () => idle,
     };
 
+    const previousLock = process.env.PI_INPUT_LOCK;
+    process.env.PI_INPUT_LOCK = "1";
     const extension = (await import("../src/index.ts")).default;
     extension(pi);
     await handlers.get("session_start")?.({}, ctx);
@@ -133,8 +141,66 @@ describe("extension preservation", () => {
     expect(editorText).toBe("");
     expect(component.getText()).toBe("");
 
-    terminalRoute?.("\x1bo");
+    terminalRoute?.("\x1b\x09");
     expect(editorText).toBe("draft prompt");
     expect(component.getText()).toBe("");
+
+    await handlers.get("agent_settled")?.({}, ctx);
+    expect(editorText).toBe("draft prompt");
+
+    idle = false;
+    await handlers.get("agent_start")?.({}, ctx);
+    expect(editorText).toBe("");
+    expect(component.getText()).toBe("");
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith(
+      "pi-input-lock",
+      expect.stringContaining("🔒 WATCH"),
+    );
+
+    await handlers.get("agent_start")?.({}, ctx);
+    expect(component.getText()).toBe("");
+
+    terminalRoute?.("\x1b\x09");
+    expect(editorText).toBe("draft prompt");
+    terminalRoute?.("\x1b\x09");
+    expect(editorText).toBe("");
+
+    idle = true;
+    await handlers.get("agent_settled")?.({}, ctx);
+    expect(editorText).toBe("draft prompt");
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith("pi-input-lock", undefined);
+    if (previousLock === undefined) delete process.env.PI_INPUT_LOCK;
+    else process.env.PI_INPUT_LOCK = previousLock;
+  });
+});
+
+
+describe("runtime activation", () => {
+  it("is disabled unless PI_INPUT_LOCK is explicitly enabled", () => {
+    const previous = process.env.PI_INPUT_LOCK;
+    try {
+      delete process.env.PI_INPUT_LOCK;
+      expect(isEnabled()).toBe(false);
+      process.env.PI_INPUT_LOCK = "1";
+      expect(isEnabled()).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.PI_INPUT_LOCK;
+      else process.env.PI_INPUT_LOCK = previous;
+    }
+  });
+
+  it("does not register runtime hooks when disabled", async () => {
+    const extension = (await import("../src/index.ts")).default;
+    const pi: any = { on: vi.fn(), registerCommand: vi.fn() };
+    const previous = process.env.PI_INPUT_LOCK;
+    try {
+      delete process.env.PI_INPUT_LOCK;
+      extension(pi);
+    } finally {
+      if (previous === undefined) delete process.env.PI_INPUT_LOCK;
+      else process.env.PI_INPUT_LOCK = previous;
+    }
+    expect(pi.on).not.toHaveBeenCalled();
+    expect(pi.registerCommand).not.toHaveBeenCalled();
   });
 });

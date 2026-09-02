@@ -12,6 +12,14 @@
 import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 
+export function isEnabled(): boolean {
+  try {
+    return process.env.PI_INPUT_LOCK === "1";
+  } catch {
+    return false;
+  }
+}
+
 export type LockState = "IDLE" | "WATCH" | "OVERRIDE";
 export type LockEvent = "toggle" | "lock" | "unlock" | "agent_start" | "agent_settled";
 
@@ -104,7 +112,8 @@ export interface InputLockRouterIO {
   requestRender?: (tui: any) => void;
 }
 
-const DEFAULT_TOGGLE_KEY = "alt+o";
+const DEFAULT_TOGGLE_KEY = "ctrl+alt+i";
+const LEGACY_TOGGLE_KEY = "alt+o";
 let cachedToggleKeyRaw: string | undefined;
 let hasToggleKeyCache = false;
 
@@ -177,7 +186,10 @@ export function resetToggleKeyCache(): void {
 
 export function matchesToggleKey(data: string): boolean {
   try {
-    return matchesKey(data, getToggleKeyId() as any);
+    const keyId = getToggleKeyId();
+    if (matchesKey(data, keyId as any)) return true;
+    if (keyId === DEFAULT_TOGGLE_KEY && data === "\x1b[105;6u") return true;
+    return !getToggleKeyRawCached() && matchesKey(data, LEGACY_TOGGLE_KEY as any);
   } catch {
     return false;
   }
@@ -221,8 +233,6 @@ export function createInputLockRouter(
     }
 
     if (source === "input" && toggle) return undefined;
-    if (!getRouterLocked(io)) return undefined;
-
     if (source === "terminal" && toggle) {
       try {
         io.toggle();
@@ -232,7 +242,7 @@ export function createInputLockRouter(
       }
       return { consume: true };
     }
-
+    if (!getRouterLocked(io)) return undefined;
     try {
       if (io.isDuplicateNav?.(data, source)) return { consume: true };
     } catch {
@@ -287,6 +297,7 @@ export class LockedEditor extends CustomEditor {
 }
 
 export default function (pi: ExtensionAPI) {
+  if (!isEnabled()) return;
   let lockState: LockState = "IDLE";
   let currentCtx: ExtensionContext | undefined;
   let savedInput = "";
@@ -298,6 +309,7 @@ export default function (pi: ExtensionAPI) {
   let lastNavData = "";
   let lastNavAt = 0;
   let lastNavSource: InputRouteSource | undefined;
+  const statusKey = "pi-input-lock";
 
   const getTui = (): any => latestTui ?? (currentCtx as any)?.ui?.tui ?? (currentCtx as any)?.tui;
 
@@ -308,6 +320,17 @@ export default function (pi: ExtensionAPI) {
     } catch {}
     try {
       currentCtx?.ui?.notify?.(message, "info");
+    } catch {}
+  };
+
+  const setLockStatus = (state: LockState): void => {
+    try {
+      const ui: any = currentCtx?.ui;
+      if (state === "WATCH") {
+        ui?.setStatus?.(statusKey, `🔒 WATCH · ${getActiveToggleLabel()} to interact`);
+      } else {
+        ui?.setStatus?.(statusKey, undefined);
+      }
     } catch {}
   };
 
@@ -423,10 +446,23 @@ export default function (pi: ExtensionAPI) {
 
   const applyTransition = (event: LockEvent): boolean => {
     const next = nextState(lockState, event);
-    if (next === lockState) return true;
-    if (!applyLockUI(isLockedState(next))) return false;
+    if (next === lockState) {
+      setLockStatus(next);
+      return true;
+    }
+    const changedLocking = isLockedState(lockState) !== isLockedState(next);
+    if (changedLocking && !applyLockUI(isLockedState(next))) return false;
     lockState = next;
+    setLockStatus(lockState);
     return true;
+  };
+
+  const forceIdle = (): boolean => {
+    const needsRestore = isLockedState(lockState) || currentLockedEditor !== undefined;
+    const restored = !needsRestore || applyLockUI(false);
+    lockState = "IDLE";
+    setLockStatus("IDLE");
+    return restored;
   };
 
   const lock = (ctx?: ExtensionContext): boolean => {
@@ -460,6 +496,14 @@ export default function (pi: ExtensionAPI) {
   const inputRoute = createInputLockRouter(routerIO, "input");
   const terminalRoute = createInputLockRouter(routerIO, "terminal");
 
+  const contextIsIdle = (ctx: ExtensionContext | undefined): boolean | undefined => {
+    try {
+      const check = (ctx as any)?.isIdle;
+      return typeof check === "function" ? Boolean(check.call(ctx)) : undefined;
+    } catch {
+      return undefined;
+    }
+  };
   const refreshCtx = (ctx: ExtensionContext | undefined): void => {
     if (!ctx) return;
     currentCtx = ctx;
@@ -467,6 +511,7 @@ export default function (pi: ExtensionAPI) {
       const tui = (ctx as any)?.ui?.tui ?? (ctx as any)?.tui;
       if (tui) latestTui = tui;
     } catch {}
+    if (contextIsIdle(ctx) === true && lockState !== "IDLE") forceIdle();
   };
 
   const installTerminalListener = (ctx: ExtensionContext): void => {
@@ -480,10 +525,51 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
+  const handleAgentStart = async (_event: any, ctx: ExtensionContext): Promise<void> => {
+    try {
+      refreshCtx(ctx);
+      if (contextIsIdle(ctx) !== false || !applyTransition("agent_start")) forceIdle();
+    } catch {
+      forceIdle();
+    }
+  };
+
+  const handleAgentSettled = async (_event: any, ctx: ExtensionContext): Promise<void> => {
+    try {
+      refreshCtx(ctx);
+      if (!applyTransition("agent_settled")) forceIdle();
+    } catch {
+      forceIdle();
+    }
+  };
+
+  const handleSessionBoundary = async (_event: any, ctx: ExtensionContext): Promise<void> => {
+    try {
+      refreshCtx(ctx);
+      forceIdle();
+    } catch {
+      forceIdle();
+    }
+  };
+
+  const handleSessionShutdown = async (_event: any, ctx: ExtensionContext): Promise<void> => {
+    try {
+      refreshCtx(ctx);
+      forceIdle();
+    } catch {
+      forceIdle();
+    }
+    try {
+      offTerminalInput?.();
+    } catch {}
+    offTerminalInput = undefined;
+    listenerInstalled = false;
+  };
   const handleSession = async (_event: any, ctx: ExtensionContext): Promise<void> => {
     refreshCtx(ctx);
     lockState = "IDLE";
     savedInput = "";
+    setLockStatus("IDLE");
     listenerInstalled = false;
     currentEditor = undefined;
     currentLockedEditor = undefined;
@@ -495,13 +581,16 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", handleSession as any);
   pi.on("session_info_changed" as any, async (_event: any, ctx: ExtensionContext) => refreshCtx(ctx));
-  pi.on("session_before_switch" as any, async (_event: any, ctx: ExtensionContext) => refreshCtx(ctx));
-  pi.on("session_before_fork" as any, async (_event: any, ctx: ExtensionContext) => refreshCtx(ctx));
+  pi.on("session_before_switch" as any, handleSessionBoundary as any);
+  pi.on("session_before_fork" as any, handleSessionBoundary as any);
   pi.on("session_before_compact" as any, async (_event: any, ctx: ExtensionContext) => refreshCtx(ctx));
   pi.on("session_compact" as any, async (_event: any, ctx: ExtensionContext) => refreshCtx(ctx));
   pi.on("session_before_tree" as any, async (_event: any, ctx: ExtensionContext) => refreshCtx(ctx));
   pi.on("session_tree" as any, async (_event: any, ctx: ExtensionContext) => refreshCtx(ctx));
-  pi.on("session_shutdown" as any, async (_event: any, ctx: ExtensionContext) => refreshCtx(ctx));
+  pi.on("session_shutdown" as any, handleSessionShutdown as any);
+  pi.on("agent_start" as any, handleAgentStart as any);
+  pi.on("agent_end" as any, async (_event: any, ctx: ExtensionContext) => refreshCtx(ctx));
+  pi.on("agent_settled" as any, handleAgentSettled as any);
 
   const cmdHandler = async (_args: string, ctx: ExtensionContext): Promise<void> => {
     if (!toggle(ctx)) {
@@ -523,9 +612,9 @@ export default function (pi: ExtensionAPI) {
 
   function getActiveToggleLabel(): string {
     try {
-      return getToggleKeyRawCached() ?? "Alt+O";
+      return getToggleKeyRawCached() ?? "Ctrl+Alt+I";
     } catch {
-      return "Alt+O";
+      return "Ctrl+Alt+I";
     }
   }
 }

@@ -28,8 +28,7 @@ Enable the extension explicitly:
 export PI_INPUT_LOCK=1
 ```
 
-The default toggle is `ctrl+alt+i`. `alt+o` remains a legacy fallback when no
-custom shortcut is configured. Configure one shortcut in
+The default toggle is `ctrl+alt+i`. Configure one shortcut in
 `.pi/agent/extensions/pi-input-lock/config.json`:
 
 ```json

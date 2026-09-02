@@ -1,7 +1,7 @@
 {
   "name": "@j1nn0/pi-input-lock",
   "version": "0.1.0",
-  "description": "Provides a manual input safety lock for Pi's interactive input",
+  "description": "Automatically locks Pi's interactive input while an agent is running.",
   "type": "module",
   "exports": {
     ".": {
@@ -13,6 +13,7 @@
     "src",
     "index.ts",
     "README.md",
+    "README.ja.md",
     "CHANGELOG.md",
     "LICENSE"
   ],

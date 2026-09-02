@@ -12,7 +12,7 @@ import {
 
 describe("lock state", () => {
   it("supports manual lock, override, and unlock transitions", () => {
-    expect(nextState("IDLE", "toggle")).toBe("WATCH");
+    expect(nextState("IDLE", "toggle")).toBe("IDLE");
     expect(nextState("WATCH", "toggle")).toBe("OVERRIDE");
     expect(nextState("OVERRIDE", "toggle")).toBe("WATCH");
     expect(nextState("WATCH", "unlock")).toBe("IDLE");
@@ -30,10 +30,14 @@ describe("lock state", () => {
     const machine = new LockStateMachine();
     expect(machine.state).toBe("IDLE");
     expect(machine.locked).toBe(false);
-    expect(machine.toggle()).toBe("WATCH");
+    expect(machine.toggle()).toBe("IDLE");
+    expect(machine.locked).toBe(false);
+    machine.transition("agent_start");
+    expect(machine.state).toBe("WATCH");
     expect(machine.locked).toBe(true);
     expect(machine.toggle()).toBe("OVERRIDE");
     expect(machine.locked).toBe(false);
+    expect(machine.toggle()).toBe("WATCH");
     expect(machine.unlock()).toBe("IDLE");
   });
 
@@ -45,11 +49,12 @@ describe("lock state", () => {
 
 describe("toggle key", () => {
   it("matches the default shortcut and does not treat ordinary text as a command", () => {
-    expect(matchesToggleKey("\x1bo")).toBe(true);
     expect(matchesToggleKey("\x1b\x09")).toBe(true);
     expect(matchesToggleKey("\x1b[105;6u")).toBe(true);
+    expect(matchesToggleKey("\x1b[105;7u")).toBe(true);
     expect(matchesToggleKey("o")).toBe(false);
     expect(matchesToggleKey("\x1b")).toBe(false);
+    expect(matchesToggleKey("\x1bo")).toBe(false);
   });
 });
 
@@ -138,15 +143,13 @@ describe("extension preservation", () => {
     expect(editorText).toBe("draft prompt");
 
     await commands[0]?.handler("", ctx);
-    expect(editorText).toBe("");
-    expect(component.getText()).toBe("");
-
-    terminalRoute?.("\x1b\x09");
     expect(editorText).toBe("draft prompt");
-    expect(component.getText()).toBe("");
-
-    await handlers.get("agent_settled")?.({}, ctx);
-    expect(editorText).toBe("draft prompt");
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      "Input lock is only available while an agent is running.",
+      "info",
+    );
+    vi.mocked(ctx.ui.notify).mockClear();
+    vi.mocked(ctx.ui.setStatus).mockClear();
 
     idle = false;
     await handlers.get("agent_start")?.({}, ctx);

@@ -31,7 +31,9 @@ export type LockEvent = "toggle" | "lock" | "unlock" | "agent_start" | "agent_se
 export function nextState(state: LockState, event: LockEvent): LockState {
   switch (event) {
     case "toggle":
-      return state === "WATCH" ? "OVERRIDE" : "WATCH";
+      if (state === "WATCH") return "OVERRIDE";
+      if (state === "OVERRIDE") return "WATCH";
+      return "IDLE";
     case "lock":
       return "WATCH";
     case "unlock":
@@ -111,9 +113,7 @@ export interface InputLockRouterIO {
   toggle: () => void;
   requestRender?: (tui: any) => void;
 }
-
 const DEFAULT_TOGGLE_KEY = "ctrl+alt+i";
-const LEGACY_TOGGLE_KEY = "alt+o";
 let cachedToggleKeyRaw: string | undefined;
 let hasToggleKeyCache = false;
 
@@ -175,8 +175,7 @@ export function getToggleKeyRawCached(): string | undefined {
 
 export function getToggleKeyId(): string {
   const raw = getToggleKeyRawCached();
-  const keyId = (raw ?? DEFAULT_TOGGLE_KEY).toLowerCase();
-  return keyId === "alt-o" ? DEFAULT_TOGGLE_KEY : keyId;
+  return (raw ?? DEFAULT_TOGGLE_KEY).toLowerCase();
 }
 
 export function resetToggleKeyCache(): void {
@@ -189,12 +188,11 @@ export function matchesToggleKey(data: string): boolean {
     const keyId = getToggleKeyId();
     if (matchesKey(data, keyId as any)) return true;
     if (keyId === DEFAULT_TOGGLE_KEY && data === "\x1b[105;6u") return true;
-    return !getToggleKeyRawCached() && matchesKey(data, LEGACY_TOGGLE_KEY as any);
+    return false;
   } catch {
     return false;
   }
 }
-
 function isArrowSequence(data: string): boolean {
   return /^(?:\x1b\[|\x1bO)[0-9;?]*[A-D]$/.test(data);
 }
@@ -593,6 +591,10 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_settled" as any, handleAgentSettled as any);
 
   const cmdHandler = async (_args: string, ctx: ExtensionContext): Promise<void> => {
+    if (lockState === "IDLE") {
+      ctx.ui.notify("Input lock is only available while an agent is running.", "info");
+      return;
+    }
     if (!toggle(ctx)) {
       flash(getTui(), "Input lock toggle is unavailable while another UI has focus");
       return;

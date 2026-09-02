@@ -47,8 +47,8 @@ describe("router with foreign focus", () => {
   it("consumes the toggle without changing the active UI", () => {
     const h = makeHarness();
     h.state.foreign = true;
-    expect(h.terminal("\x1bo")).toEqual({ consume: true });
-    expect(h.input("\x1bo")).toBeUndefined();
+    expect(h.terminal("\x1b\x09")).toEqual({ consume: true });
+    expect(h.input("\x1b\x09")).toBeUndefined();
     expect(h.calls.toggle).not.toHaveBeenCalled();
     expect(h.state.locked).toBe(true);
   });
@@ -57,8 +57,8 @@ describe("router with foreign focus", () => {
 describe("router with owned focus", () => {
   it("handles the toggle once through the terminal channel", () => {
     const h = makeHarness();
-    expect(h.terminal("\x1bo")).toEqual({ consume: true });
-    expect(h.input("\x1bo")).toBeUndefined();
+    expect(h.terminal("\x1b\x09")).toEqual({ consume: true });
+    expect(h.input("\x1b\x09")).toBeUndefined();
     expect(h.calls.toggle).toHaveBeenCalledTimes(1);
     expect(h.calls.render).toHaveBeenCalledTimes(1);
   });

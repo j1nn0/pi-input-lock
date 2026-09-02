@@ -27,8 +27,7 @@ PI_INPUT_LOCK=1 pi -ne -e . --tui-mode fullscreen
 export PI_INPUT_LOCK=1
 ```
 
-既定の切替キーは `ctrl+alt+i` です。カスタム設定がない場合は互換用に `alt+o` も
-使えます。`.pi/agent/extensions/pi-input-lock/config.json` でキーを一つ設定できます。
+既定の切替キーは `ctrl+alt+i` です。`.pi/agent/extensions/pi-input-lock/config.json` でキーを一つ設定できます。
 
 ```json
 { "toggleKey": "ctrl+alt+i" }

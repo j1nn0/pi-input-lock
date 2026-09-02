@@ -19,9 +19,8 @@ export function isEnabled(): boolean {
     return false;
   }
 }
-
 export type LockState = "IDLE" | "WATCH" | "OVERRIDE";
-export type LockEvent = "toggle" | "lock" | "unlock" | "agent_start" | "agent_settled";
+export type LockEvent = "toggle" | "agent_start" | "agent_settled";
 
 /**
  * Pure state transition used by the extension and by a future lifecycle hook.
@@ -33,10 +32,6 @@ export function nextState(state: LockState, event: LockEvent): LockState {
     case "toggle":
       if (state === "WATCH") return "OVERRIDE";
       if (state === "OVERRIDE") return "WATCH";
-      return "IDLE";
-    case "lock":
-      return "WATCH";
-    case "unlock":
       return "IDLE";
     case "agent_start":
       return state === "OVERRIDE" ? "OVERRIDE" : "WATCH";
@@ -74,14 +69,6 @@ export class LockStateMachine {
 
   toggle(): LockState {
     return this.transition("toggle");
-  }
-
-  lock(): LockState {
-    return this.transition("lock");
-  }
-
-  unlock(): LockState {
-    return this.transition("unlock");
   }
 }
 
@@ -463,21 +450,12 @@ export default function (pi: ExtensionAPI) {
     return restored;
   };
 
-  const lock = (ctx?: ExtensionContext): boolean => {
-    if (ctx) currentCtx = ctx;
-    if (dialogOpen()) return false;
-    return applyTransition("lock");
-  };
-  const unlock = (ctx?: ExtensionContext): boolean => {
-    if (ctx) currentCtx = ctx;
-    if (dialogOpen()) return false;
-    return applyTransition("unlock");
-  };
   const toggle = (ctx?: ExtensionContext): boolean => {
     if (ctx) currentCtx = ctx;
     if (dialogOpen()) return false;
     return applyTransition("toggle");
   };
+
 
   const routerIO: InputLockRouterIO = {
     isLocked: () => isLockedState(lockState),

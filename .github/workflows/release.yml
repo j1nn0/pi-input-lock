@@ -1,7 +1,6 @@
 name: Release
 
-# 手动打 tag 触发发布：`v<version>`（如 `v0.1.0`）
-# 流程：1. 校验 + 测试 → 2. GitHub Release → 3. 发布到 npm
+# タグ `v<version>` (例 `v0.1.0`) のpushでリリース: 検証→GitHub Release→npm publish
 on:
   push:
     tags:

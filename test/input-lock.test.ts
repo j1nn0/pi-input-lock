@@ -15,8 +15,6 @@ describe("lock state", () => {
     expect(nextState("IDLE", "toggle")).toBe("IDLE");
     expect(nextState("WATCH", "toggle")).toBe("OVERRIDE");
     expect(nextState("OVERRIDE", "toggle")).toBe("WATCH");
-    expect(nextState("WATCH", "unlock")).toBe("IDLE");
-    expect(nextState("IDLE", "lock")).toBe("WATCH");
   });
 
   it("keeps lifecycle transitions available without wiring them in", () => {
@@ -24,6 +22,7 @@ describe("lock state", () => {
     expect(nextState("WATCH", "agent_settled")).toBe("IDLE");
     expect(nextState("OVERRIDE", "agent_start")).toBe("OVERRIDE");
     expect(nextState("OVERRIDE", "agent_settled")).toBe("IDLE");
+    expect(nextState("IDLE", "toggle")).toBe("IDLE");
   });
 
   it("exposes a UI-independent state controller", () => {
@@ -38,7 +37,8 @@ describe("lock state", () => {
     expect(machine.toggle()).toBe("OVERRIDE");
     expect(machine.locked).toBe(false);
     expect(machine.toggle()).toBe("WATCH");
-    expect(machine.unlock()).toBe("IDLE");
+    machine.transition("agent_settled");
+    expect(machine.state).toBe("IDLE");
   });
 
   it("only WATCH is blocking", () => {

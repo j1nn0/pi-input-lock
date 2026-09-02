@@ -22,7 +22,7 @@ Pi coding agent の独立拡張。`@earendil-works/pi-coding-agent` 0.84.2+、ji
 - 遷移: `IDLE --agent_start→ WATCH --toggle→ OVERRIDE --toggle→ WATCH --agent_settled→ IDLE`。`IDLE + toggle → IDLE`（手動でWATCHに入れない）。`WATCH/OVERRIDE + agent_settled → IDLE` は常にIDLEへ。`nextState(state,event)` は純粋関数で単体テスト可能。重複`agent_start`/`settled`は冪等。
 
 ## 有効化
-- `PI_INPUT_LOCK=1` のときのみ動作。未設定では拡張はno-op（エディタ置換・listener登録・status表示なし、純粋関数はimport可能）。親Piが `HERDR_ENV` を持っていても影響しない。`VITEST`時はテストのため有効とみなす。
+- `PI_INPUT_LOCK=1` のときのみ動作。未設定では拡張はno-op（エディタ置換・listener登録・status表示なし、純粋関数はimport可能）。親Piが `HERDR_ENV` を持っていても影響しない。
 
 ## 入力ルーティング
 - `tui.addInputListener` (TUI) + `ctx.ui.onTerminalInput` (terminal) の二重チャネル。`listenerInstalled`で重複登録防止、`offTerminalInput`で解除。
@@ -39,7 +39,7 @@ Pi coding agent の独立拡張。`@earendil-works/pi-coding-agent` 0.84.2+、ji
 - 既定 `ctrl+alt+i` (Kitty `\x1b[105;7u` と legacy `\x1b\x09`)、`config.json: {toggleKey}`で任意の`KeyId`に変更可能 (`readConfigJson`は`__dirname`と`~/.pi/agent/extensions/pi-input-lock/config.json`を走査)。`matchesToggleKey`は`matchesKey` + 105;6u互換、`getToggleKeyId`で正規化。コマンド`/input-lock` `/lock` は`IDLE`時は `Input lock is only available while an agent is running.` を通知してno-op。
 
 ## テスト
-- `pnpm check` / `pnpm test` / `pnpm pack:check` で検証。ルーティング変更時は `test/router.test.ts` のforeign/ownedケースを維持。`ScrollReaderEditor`/`LockedEditor`は実theme/keybindingsで生成すること。
+- `pnpm check` / `pnpm test` / `pnpm pack:check` で検証。ルーティング変更時は `test/router.test.ts` のforeign/ownedケースを維持。`BaseEditor`/`LockedEditor`は実theme/keybindingsで生成すること。
 - 主要テスト: `nextState`の6遷移+重複、`isForeignFocus`、`toggleKey`一致、routerのWATCH block/OVERRIDE/IDLE、エディタ保存復元、agent lifecycle、無効時。
 
 ## リリース

@@ -58,4 +58,7 @@ PI_INPUT_LOCK=1 pi -ne -e . --tui-mode fullscreen
 
 ## License
 
-MIT
+MIT License.
+
+This project is derived in part from `@inobit/pi-reader`,
+Copyright (c) 2026 inobit, also licensed under the MIT License.

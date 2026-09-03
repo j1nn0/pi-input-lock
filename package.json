@@ -1,6 +1,6 @@
 {
   "name": "@j1nn0/pi-input-lock",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Automatically locks Pi's interactive input while an agent is running.",
   "type": "module",
   "exports": {

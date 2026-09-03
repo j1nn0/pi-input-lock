@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.1] - 2026-09-03
+
+- Remove obsolete project `.npmrc`.
+- Translate `AGENTS.md` to English.
+- Migrate npm releases to Trusted Publishing with OIDC.
+
 ## [0.1.0] - 2026-09-02
 
 - chore: promote `@inobit/pi-reader` to standalone `@j1nn0/pi-input-lock` (single package, `pnpm-workspace.yaml`/`tsconfig.base.json` removed, `pi` entry at `./index.ts`, release tags `v*`). Based on `@inobit/pi-reader`; original MIT `Copyright (c) 2026 inobit` preserved.

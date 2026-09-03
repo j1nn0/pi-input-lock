@@ -1,13 +1,20 @@
 {
   "name": "@j1nn0/pi-input-lock",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Automatically locks Pi's interactive input while an agent is running.",
-  "type": "module",
-  "exports": {
-    ".": {
-      "types": "./src/index.ts",
-      "default": "./src/index.ts"
-    }
+  "keywords": [
+    "input-lock",
+    "pi",
+    "pi-coding-agent",
+    "pi-extension",
+    "pi-package",
+    "safety",
+    "watch"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/j1nn0/pi-input-lock.git"
   },
   "files": [
     "src",
@@ -17,43 +24,22 @@
     "CHANGELOG.md",
     "LICENSE"
   ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "check": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit -p tsconfig.json",
     "pack:check": "pnpm pack --pack-destination /tmp"
-  },
-  "keywords": [
-    "pi-package",
-    "pi",
-    "pi-extension",
-    "pi-coding-agent",
-    "input-lock",
-    "watch",
-    "safety"
-  ],
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/j1nn0/pi-input-lock.git"
-  },
-  "engines": {
-    "node": ">=24"
-  },
-  "packageManager": "pnpm@11.22.0",
-  "publishConfig": {
-    "access": "public"
-  },
-  "pi": {
-    "extensions": [
-      "./index.ts"
-    ]
-  },
-  "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.84.2",
-    "@earendil-works/pi-coding-agent": ">=0.84.2",
-    "@earendil-works/pi-tui": ">=0.84.2"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "0.84.2",
@@ -62,5 +48,19 @@
     "@types/node": "^24.0.0",
     "typescript": "^7.0.0",
     "vitest": "^4.1.8"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.84.2",
+    "@earendil-works/pi-coding-agent": ">=0.84.2",
+    "@earendil-works/pi-tui": ">=0.84.2"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "packageManager": "pnpm@11.22.0",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
   }
 }

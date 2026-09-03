@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2] - 2026-09-03
+
+- Preserve and restore the exact editor component around WATCH mode.
+- Avoid taking ownership of the editor while idle.
+- Dispose WATCH input listeners across unlock and session boundaries.
+- Fail open to the default editor if custom editor restoration fails.
+
 ## [0.1.1] - 2026-09-03
 
 - Remove obsolete project `.npmrc`.

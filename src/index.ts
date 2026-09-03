@@ -13,6 +13,8 @@
 import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 
+type EditorFactory = (tui: TUI, theme: any, keybindings: any) => any;
+
 export function isEnabled(): boolean {
   try {
     return process.env.PI_INPUT_LOCK === "1";
@@ -290,6 +292,11 @@ export default function (pi: ExtensionAPI) {
   let latestTui: TUI | undefined;
   let listenerInstalled = false;
   let offTerminalInput: (() => void) | undefined;
+  let offInputListener: (() => void) | undefined;
+  let savedEditorFactory: EditorFactory | undefined;
+  let hasSavedEditorFactory = false;
+  let currentEditorFactory: EditorFactory | undefined;
+  let hasCurrentEditorFactory = false;
   let currentEditor: object | undefined;
   let currentLockedEditor: object | undefined;
   let lastNavData = "";
@@ -340,12 +347,30 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
+  const syncCurrentEditor = (): void => {
+    const ui: any = currentCtx?.ui;
+    if (!ui || typeof ui.getEditorComponent !== "function") return;
+    let factory: EditorFactory | undefined;
+    try {
+      factory = ui.getEditorComponent() as EditorFactory | undefined;
+    } catch {
+      return;
+    }
+    if (!hasCurrentEditorFactory || factory !== currentEditorFactory) {
+      const focused = focusedComponent(getTui());
+      if (focused && typeof focused === "object") currentEditor = focused;
+      currentEditorFactory = factory;
+      hasCurrentEditorFactory = true;
+    }
+  };
+
   const dialogOpen = (): boolean => {
     try {
+      syncCurrentEditor();
       const tui = getTui();
-      return isForeignFocus(focusedComponent(tui), {
-        editor: currentLockedEditor ?? currentEditor,
-      });
+      const editor = currentLockedEditor ?? currentEditor;
+      if (!editor) return false;
+      return isForeignFocus(focusedComponent(tui), { editor });
     } catch {
       return false;
     }
@@ -360,22 +385,6 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
-  const factory = (tui: TUI, theme: any, keybindings: any): BaseEditor => {
-    latestTui = tui;
-    currentLockedEditor = undefined;
-    const editor = new BaseEditor(tui, theme, keybindings);
-    currentEditor = editor;
-    if (!listenerInstalled) {
-      listenerInstalled = true;
-      try {
-        tui.addInputListener?.(inputRoute);
-      } catch {
-        listenerInstalled = false;
-      }
-    }
-    return editor;
-  };
-  const mainFactory = (tui: TUI, theme: any, keybindings: any) => factory(tui, theme, keybindings);
 
   const lockedEditorFactory = (ui: any) => (tui: TUI, theme: any, keybindings: any): LockedEditor => {
     latestTui = tui;
@@ -387,67 +396,138 @@ export default function (pi: ExtensionAPI) {
     return editor;
   };
 
-  /** Replace the editor only after capturing text, and restore on every failure. */
+  /** Borrow the editor only for WATCH and restore the exact captured surface. */
   const applyLockUI = (locked: boolean): boolean => {
     const ui: any = currentCtx?.ui;
     if (!ui || typeof ui.setEditorComponent !== "function") return false;
 
     if (locked) {
-      if (typeof ui.getEditorText !== "function" || typeof ui.setEditorText !== "function") return false;
+      if (
+        typeof ui.getEditorComponent !== "function" ||
+        typeof ui.getEditorText !== "function" ||
+        typeof ui.setEditorText !== "function"
+      ) {
+        return false;
+      }
+
       let text: string;
+      let editorFactory: EditorFactory | undefined;
       try {
         text = String(ui.getEditorText() ?? "");
+        editorFactory = ui.getEditorComponent() as EditorFactory | undefined;
       } catch {
         return false;
       }
+
+      savedEditorFactory = editorFactory;
+      hasSavedEditorFactory = true;
+      const focused = focusedComponent(getTui());
+      if (focused && typeof focused === "object") currentEditor = focused;
+
       try {
-        ui.setEditorComponent(lockedEditorFactory(ui));
+        const lockedFactory = lockedEditorFactory(ui);
+        currentEditorFactory = lockedFactory;
+        hasCurrentEditorFactory = true;
+        ui.setEditorComponent(lockedFactory);
         ui.setEditorText("");
         savedInput = text;
         return true;
       } catch {
+        currentLockedEditor = undefined;
         try {
-          ui.setEditorComponent(mainFactory);
+          currentEditorFactory = editorFactory;
+          hasCurrentEditorFactory = true;
+          ui.setEditorComponent(editorFactory);
           ui.setEditorText(text);
-        } catch {}
+        } catch {
+          try {
+            currentEditorFactory = undefined;
+            hasCurrentEditorFactory = true;
+            ui.setEditorComponent(undefined);
+            ui.setEditorText(text);
+          } catch {}
+        }
+        savedEditorFactory = undefined;
+        hasSavedEditorFactory = false;
         return false;
       }
     }
 
     const text = savedInput;
-    try {
-      ui.setEditorComponent(mainFactory);
+    const editorFactory = hasSavedEditorFactory ? savedEditorFactory : undefined;
+    let restoredFactory = editorFactory;
+    const restore = (factoryToRestore: EditorFactory | undefined): void => {
+      ui.setEditorComponent(factoryToRestore);
       if (typeof ui.setEditorText !== "function") throw new Error("editor text setter unavailable");
       ui.setEditorText(text);
-      savedInput = "";
-      return true;
+    };
+
+    try {
+      restore(editorFactory);
     } catch {
       try {
-        ui.setEditorComponent(lockedEditorFactory(ui));
-        ui.setEditorText?.("");
-      } catch {}
-      return false;
+        restore(undefined);
+        restoredFactory = undefined;
+      } catch {
+        return false;
+      }
     }
+
+    savedInput = "";
+    savedEditorFactory = undefined;
+    hasSavedEditorFactory = false;
+    currentLockedEditor = undefined;
+    currentEditorFactory = restoredFactory;
+    hasCurrentEditorFactory = true;
+    const focused = focusedComponent(getTui());
+    currentEditor = focused && typeof focused === "object" ? focused : undefined;
+    return true;
   };
 
   const applyTransition = (event: LockEvent): boolean => {
     const next = nextState(lockState, event);
     if (next === lockState) {
+      if (isLockedState(next) && !listenerInstalled && !installInputListener(getTui())) return false;
       setLockStatus(next);
       return true;
     }
-    const changedLocking = isLockedState(lockState) !== isLockedState(next);
-    if (changedLocking && !applyLockUI(isLockedState(next))) return false;
+
+    const wasLocked = isLockedState(lockState);
+    const willBeLocked = isLockedState(next);
+    if (wasLocked !== willBeLocked) {
+      if (dialogOpen()) return false;
+      if (!applyLockUI(willBeLocked)) return false;
+    }
+
+    if (willBeLocked) {
+      if (!installInputListener(getTui())) {
+        if (!wasLocked) applyLockUI(false);
+        return false;
+      }
+    } else {
+      disposeInputListener();
+    }
+
     lockState = next;
     setLockStatus(lockState);
     return true;
   };
 
   const forceIdle = (): boolean => {
-    const needsRestore = isLockedState(lockState) || currentLockedEditor !== undefined;
+    const needsRestore = isLockedState(lockState) || currentLockedEditor !== undefined || hasSavedEditorFactory;
+    if (needsRestore && dialogOpen()) return false;
+
     const restored = !needsRestore || applyLockUI(false);
+    if (!restored && currentLockedEditor !== undefined) return false;
+
+    disposeInputListener();
     lockState = "IDLE";
     setLockStatus("IDLE");
+    if (!restored) {
+      savedInput = "";
+      savedEditorFactory = undefined;
+      hasSavedEditorFactory = false;
+    }
     return restored;
   };
 
@@ -472,6 +552,30 @@ export default function (pi: ExtensionAPI) {
   };
   const inputRoute = createInputLockRouter(routerIO, "input");
   const terminalRoute = createInputLockRouter(routerIO, "terminal");
+
+  const disposeInputListener = (): void => {
+    const disposer = offInputListener;
+    offInputListener = undefined;
+    listenerInstalled = false;
+    try {
+      disposer?.();
+    } catch {}
+  };
+
+  const installInputListener = (tui: any): boolean => {
+    if (listenerInstalled) return true;
+    if (!tui || typeof tui.addInputListener !== "function") return false;
+    try {
+      const disposer = tui.addInputListener(inputRoute);
+      offInputListener = typeof disposer === "function" ? disposer : undefined;
+      listenerInstalled = true;
+      return true;
+    } catch {
+      offInputListener = undefined;
+      listenerInstalled = false;
+      return false;
+    }
+  };
 
   const contextIsIdle = (ctx: ExtensionContext | undefined): boolean | undefined => {
     try {
@@ -525,8 +629,11 @@ export default function (pi: ExtensionAPI) {
       refreshCtx(ctx);
       forceIdle();
     } catch {
-      forceIdle();
+      try {
+        forceIdle();
+      } catch {}
     }
+    disposeInputListener();
   };
 
   const handleSessionShutdown = async (_event: any, ctx: ExtensionContext): Promise<void> => {
@@ -534,25 +641,48 @@ export default function (pi: ExtensionAPI) {
       refreshCtx(ctx);
       forceIdle();
     } catch {
-      forceIdle();
+      try {
+        forceIdle();
+      } catch {}
     }
+    disposeInputListener();
     try {
       offTerminalInput?.();
     } catch {}
     offTerminalInput = undefined;
-    listenerInstalled = false;
   };
+
   const handleSession = async (_event: any, ctx: ExtensionContext): Promise<void> => {
-    refreshCtx(ctx);
-    lockState = "IDLE";
-    savedInput = "";
-    setLockStatus("IDLE");
-    listenerInstalled = false;
-    currentEditor = undefined;
-    currentLockedEditor = undefined;
+    let restored = true;
     try {
-      ctx.ui.setEditorComponent((tui, theme, keybindings) => factory(tui, theme, keybindings));
-    } catch {}
+      restored = forceIdle();
+    } catch {
+      restored = false;
+    }
+    disposeInputListener();
+    refreshCtx(ctx);
+
+    if (!restored && currentLockedEditor !== undefined && !dialogOpen()) {
+      try {
+        ctx.ui.setEditorComponent(undefined);
+        currentLockedEditor = undefined;
+        currentEditorFactory = undefined;
+        hasCurrentEditorFactory = false;
+      } catch {}
+    }
+
+    if (currentLockedEditor === undefined) {
+      lockState = "IDLE";
+      savedInput = "";
+      savedEditorFactory = undefined;
+      hasSavedEditorFactory = false;
+      currentEditorFactory = undefined;
+      hasCurrentEditorFactory = false;
+      currentEditor = undefined;
+      setLockStatus("IDLE");
+    } else {
+      setLockStatus(lockState);
+    }
     installTerminalListener(ctx);
   };
 

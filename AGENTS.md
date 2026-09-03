@@ -27,10 +27,10 @@ Standalone Pi coding agent extension for `@earendil-works/pi-coding-agent` 0.84.
 ## Input Routing
 - Dual channel: `tui.addInputListener` (TUI) + `ctx.ui.onTerminalInput` (terminal). `listenerInstalled` prevents duplicate registration, `offTerminalInput` cleans up.
 - Router `createInputLockRouter(io, source)` does per-key `isForeignFocus(tui.focusedComponent, {editor})` via `dialogOpen()`. When a foreign UI holds focus, everything except `terminal+toggle` is `undefined` (pass-through); otherwise in `WATCH` only `toggle` (owned by terminal) passes, others are `{consume:true}` (block). `isDuplicateNav` suppresses duplicate delivery for 20ms, arrow CSI/SSU passes through to `LockedEditor` (no-op).
-- `LockedEditor` renders `🔒 WATCH · <toggle> to interact` centered, `handleInput` is no-op and secondarily blocks Pi shortcuts. `BaseEditor` is the normal editor.
+- `LockedEditor` renders `🔒 WATCH · <toggle> to interact` centered, `handleInput` is no-op and secondarily blocks Pi shortcuts. `BaseEditor` is retained only as an exported construction helper; the extension does not install it while `IDLE`.
 
 ## Editor Preservation
-- `applyLockUI(locked)` saves `ui.getEditorText()` to `savedInput`, then `setEditorComponent(lockedEditorFactory)`→`setEditorText("")`; on unlock `setEditorComponent(mainFactory)`→`setEditorText(savedInput)`. On failure it reverses for fail-open. `forceIdle()` guarantees restoration from `WATCH`. `currentEditor/currentLockedEditor` are the `focusedComponent` check basis.
+- `applyLockUI(true)` captures `ui.getEditorComponent()` and `ui.getEditorText()` before borrowing the editor. Restore passes the exact saved factory (including `undefined` for Pi's default) and the saved draft, clearing the capture only after success; a restore failure falls back to the default editor and never declares `IDLE` with `LockedEditor` mounted.
 
 ## Fail-open
 - `refreshCtx` forces `forceIdle()` to `IDLE` whenever `ctx.isIdle()===true`. `WATCH` is only entered via `agent_start`. Exceptions, abort, error, `/new`, session switch, reload, duplicate events are idempotent via `applyTransition`, `handleSession` resets to `IDLE`, `setStatus` is try/catch.
@@ -39,7 +39,7 @@ Standalone Pi coding agent extension for `@earendil-works/pi-coding-agent` 0.84.
 - Default `ctrl+alt+i` (Kitty `\x1b[105;7u` and legacy `\x1b\x09`), configurable via `config.json: {toggleKey}` as any `KeyId` (`readConfigJson` scans `__dirname` and `~/.pi/agent/extensions/pi-input-lock/config.json`). `matchesToggleKey` uses `matchesKey` + 105;6u compatibility, `getToggleKeyId` normalizes. Commands `/input-lock` `/lock` are no-op with `Input lock is only available while an agent is running.` when `IDLE`.
 
 ## Tests
-- Verify via `pnpm check` / `pnpm test` / `pnpm pack:check`. When changing routing, keep `test/router.test.ts` foreign/owned cases. `BaseEditor`/`LockedEditor` must be constructed with real theme/keybindings.
+- Verify via `pnpm check` / `pnpm test` / `pnpm pack:check`. When changing routing, keep `test/router.test.ts` foreign/owned cases. Construct `LockedEditor`/the exported `BaseEditor` helper with real theme/keybindings; the extension borrows no editor while `IDLE` and installs/disposes its input listener with `WATCH`.
 - Main tests: 6 `nextState` transitions + duplicates, `isForeignFocus`, `toggleKey` matching, router WATCH block/OVERRIDE/IDLE, editor save/restore, agent lifecycle, disabled.
 
 ## Release

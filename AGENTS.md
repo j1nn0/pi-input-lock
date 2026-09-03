@@ -44,3 +44,4 @@ Standalone Pi coding agent extension for `@earendil-works/pi-coding-agent` 0.84.
 
 ## Release
 - Update `package.json` `CHANGELOG.md`, tag is `v0.1.0` form. Keep `pi-reader` derived MIT `Copyright (c) 2026 inobit`.
+- Commit messages do not require `Co-authored-by: inobit pi-reader`.

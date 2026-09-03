@@ -463,8 +463,10 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
+    // Foreign focus can leave WATCH unborrowed; there is no editor surface to restore.
+    if (!hasSavedEditorFactory) return true;
     const text = savedInput;
-    const editorFactory = hasSavedEditorFactory ? savedEditorFactory : undefined;
+    const editorFactory = savedEditorFactory;
     let restoredFactory = editorFactory;
     const restore = (factoryToRestore: EditorFactory | undefined): void => {
       ui.setEditorComponent(factoryToRestore);

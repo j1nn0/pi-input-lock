@@ -282,6 +282,69 @@ describe("editor borrowing", () => {
     });
   });
 
+
+  it("keeps an unborrowed WATCH untouched through toggle and settlement", async () => {
+    await withEnabled(async () => {
+      const factoryA: EditorFactory = vi.fn(() => ({ name: "editor-a", getText: () => "" }));
+      const editorA = { name: "editor-a", getText: () => "" };
+      const harness = makeHarness(factoryA, editorA, "unborrowed draft");
+      await startExtension(harness);
+
+      // Establish the real editor reference before a foreign component takes focus.
+      harness.terminal("focus-probe");
+      const dialog = { name: "ask-user" };
+      harness.focus(dialog);
+      harness.idle = false;
+      await agentStart(harness);
+
+      expect(harness.componentFactory).toBe(factoryA);
+      expect(harness.component).toBe(editorA);
+      expect(harness.editorText).toBe("unborrowed draft");
+      expect(harness.activeInputHandlers.size).toBe(1);
+      expect(harness.setEditorComponent).not.toHaveBeenCalled();
+
+      harness.clearFocus();
+      harness.terminal("\x1b\x09");
+      expect(harness.componentFactory).toBe(factoryA);
+      expect(harness.editorText).toBe("unborrowed draft");
+      expect(harness.setEditorComponent.mock.calls.some(([factory]) => factory === undefined)).toBe(false);
+      expect(harness.activeInputHandlers.size).toBe(0);
+
+      harness.idle = true;
+      await agentSettled(harness);
+      expect(harness.componentFactory).toBe(factoryA);
+      expect(harness.editorText).toBe("unborrowed draft");
+      expect(harness.setEditorComponent.mock.calls.some(([factory]) => factory === undefined)).toBe(false);
+      expect(harness.ui.setStatus).toHaveBeenLastCalledWith("pi-input-lock", undefined);
+    });
+  });
+
+  it("settles an unborrowed WATCH while foreign focus remains without creating pending restore", async () => {
+    await withEnabled(async () => {
+      const factoryA: EditorFactory = vi.fn(() => ({ name: "editor-a", getText: () => "" }));
+      const editorA = { name: "editor-a", getText: () => "" };
+      const harness = makeHarness(factoryA, editorA, "unborrowed draft");
+      await startExtension(harness);
+      harness.terminal("focus-probe");
+      harness.focus({ name: "ask-user" });
+      harness.idle = false;
+      await agentStart(harness);
+      harness.idle = true;
+
+      await agentSettled(harness);
+      expect(harness.componentFactory).toBe(factoryA);
+      expect(harness.editorText).toBe("unborrowed draft");
+      expect(harness.activeInputHandlers.size).toBe(0);
+      expect(harness.ui.setStatus).toHaveBeenLastCalledWith("pi-input-lock", undefined);
+
+      harness.clearFocus();
+      harness.terminal("safe-key");
+      expect(harness.componentFactory).toBe(factoryA);
+      expect(harness.editorText).toBe("unborrowed draft");
+      expect(harness.setEditorComponent.mock.calls.some(([factory]) => factory === undefined)).toBe(false);
+    });
+  });
+
   it("round-trips the Pi default editor through undefined", async () => {
     await withEnabled(async () => {
       const harness = makeHarness(undefined, undefined, "default draft");

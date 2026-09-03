@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createInputLockRouter,
   isForeignFocus,
+  nextState,
   type InputLockRouterIO,
+  type LockState,
 } from "../src/index.ts";
 
 function makeHarness(overrides: Partial<InputLockRouterIO> = {}) {
@@ -103,5 +105,101 @@ describe("focus comparison", () => {
     expect(isForeignFocus(editor, owned)).toBe(false);
     expect(isForeignFocus({}, owned)).toBe(true);
     expect(isForeignFocus(undefined, owned)).toBe(false);
+  });
+});
+
+// One physical toggle-key press toggles exactly once. Kitty repeat (event
+// type 2) and release (event type 3) share the press codepoint/modifier but
+// must never toggle, or WATCH would bounce straight back on key release.
+const PRESS = "\x1b[105;7u";
+const REPEAT = "\x1b[105;7:2u";
+const RELEASE = "\x1b[105;7:3u";
+
+function makeStateHarness(initial: LockState) {
+  let state: LockState = initial;
+  let foreign = false;
+  const toggle = vi.fn(() => {
+    state = nextState(state, "toggle");
+  });
+  const tui: any = { requestRender: vi.fn() };
+  const io: InputLockRouterIO = {
+    lockState: () => state,
+    dialogOpen: () => foreign,
+    getTui: () => tui,
+    toggle,
+    requestRender: (target) => target?.requestRender?.(),
+  };
+  return {
+    get state(): LockState {
+      return state;
+    },
+    get foreign(): boolean {
+      return foreign;
+    },
+    setForeign: (value: boolean) => {
+      foreign = value;
+    },
+    toggle,
+    terminal: createInputLockRouter(io, "terminal"),
+    input: createInputLockRouter(io, "input"),
+  };
+}
+
+describe("press-only toggle (Kitty event types)", () => {
+  it("toggles WATCH->OVERRIDE exactly once across press, repeat, and release", () => {
+    const h = makeStateHarness("WATCH");
+    expect(h.input(PRESS)).toBeUndefined();
+    expect(h.toggle).not.toHaveBeenCalled();
+    expect(h.terminal(PRESS)).toEqual({ consume: true });
+    expect(h.state).toBe("OVERRIDE");
+    expect(h.toggle).toHaveBeenCalledTimes(1);
+    expect(h.terminal(REPEAT)).toBeUndefined();
+    expect(h.state).toBe("OVERRIDE");
+    expect(h.terminal(RELEASE)).toBeUndefined();
+    expect(h.state).toBe("OVERRIDE");
+    expect(h.toggle).toHaveBeenCalledTimes(1);
+  });
+
+  it("toggles OVERRIDE->WATCH exactly once across press, repeat, and release", () => {
+    const h = makeStateHarness("OVERRIDE");
+    expect(h.terminal(PRESS)).toEqual({ consume: true });
+    expect(h.state).toBe("WATCH");
+    expect(h.toggle).toHaveBeenCalledTimes(1);
+    expect(h.terminal(REPEAT)).toEqual({ consume: true });
+    expect(h.state).toBe("WATCH");
+    expect(h.terminal(RELEASE)).toEqual({ consume: true });
+    expect(h.state).toBe("WATCH");
+    expect(h.toggle).toHaveBeenCalledTimes(1);
+  });
+
+  it("toggles exactly once for a long hold (press + repeats + release)", () => {
+    const h = makeStateHarness("WATCH");
+    h.terminal(PRESS);
+    h.terminal(REPEAT);
+    h.terminal(REPEAT);
+    h.terminal(REPEAT);
+    h.terminal(RELEASE);
+    expect(h.toggle).toHaveBeenCalledTimes(1);
+    expect(h.state).toBe("OVERRIDE");
+  });
+
+  it("leaves a foreign UI untouched for press, repeat, and release", () => {
+    const h = makeStateHarness("WATCH");
+    h.setForeign(true);
+    expect(h.terminal(PRESS)).toEqual({ consume: true });
+    expect(h.terminal(REPEAT)).toBeUndefined();
+    expect(h.terminal(RELEASE)).toBeUndefined();
+    expect(h.input(PRESS)).toBeUndefined();
+    expect(h.toggle).not.toHaveBeenCalled();
+    expect(h.state).toBe("WATCH");
+    expect(h.foreign).toBe(true);
+  });
+
+  it("keeps IDLE a no-op for press, repeat, and release", () => {
+    const h = makeStateHarness("IDLE");
+    h.terminal(PRESS);
+    h.terminal(REPEAT);
+    h.terminal(RELEASE);
+    expect(h.state).toBe("IDLE");
   });
 });

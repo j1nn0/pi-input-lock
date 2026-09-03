@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: MIT
  */
 import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { matchesKey, visibleWidth, type TUI } from "@earendil-works/pi-tui";
+import { isKeyRelease, isKeyRepeat, matchesKey, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 
 type EditorFactory = (tui: TUI, theme: any, keybindings: any) => any;
 
@@ -175,6 +175,7 @@ export function resetToggleKeyCache(): void {
 
 export function matchesToggleKey(data: string): boolean {
   try {
+    if (isKeyRelease(data) || isKeyRepeat(data)) return false;
     const keyId = getToggleKeyId();
     if (matchesKey(data, keyId as any)) return true;
     if (keyId === DEFAULT_TOGGLE_KEY && data === "\x1b[105;6u") return true;

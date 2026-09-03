@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
+  getToggleKeyId,
   isEnabled,
   isForeignFocus,
   isLockedState,
@@ -7,6 +11,7 @@ import {
   LockedEditor,
   matchesToggleKey,
   nextState,
+  resetToggleKeyCache,
   type LockState,
 } from "../src/index.ts";
 import extension from "../src/index.ts";
@@ -214,6 +219,38 @@ describe("toggle key", () => {
     expect(matchesToggleKey("o")).toBe(false);
     expect(matchesToggleKey("\x1b")).toBe(false);
     expect(matchesToggleKey("\x1bo")).toBe(false);
+  });
+
+  it("is press-only: Kitty repeat and release never toggle", () => {
+    expect(matchesToggleKey("\x1b[105;7u")).toBe(true);
+    expect(matchesToggleKey("\x1b[105;7:2u")).toBe(false);
+    expect(matchesToggleKey("\x1b[105;7:3u")).toBe(false);
+    expect(matchesToggleKey("\x1b\x09")).toBe(true);
+    expect(matchesToggleKey("\x1b[105;6u")).toBe(true);
+    // The legacy fallback is exact-equality (press-only by construction).
+    expect(matchesToggleKey("\x1b[105;6:2u")).toBe(false);
+    expect(matchesToggleKey("\x1b[105;6:3u")).toBe(false);
+  });
+
+  it("applies press-only filtering before matching so any configured key obeys it", () => {
+    const previousHome = process.env.HOME;
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-input-lock-test-"));
+    try {
+      const dir = path.join(tmp, ".pi", "agent", "extensions", "pi-input-lock");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify({ toggleKey: "ctrl+x" }));
+      process.env.HOME = tmp;
+      resetToggleKeyCache();
+      expect(getToggleKeyId()).toBe("ctrl+x");
+      expect(matchesToggleKey("\x1b[120;5u")).toBe(true);
+      expect(matchesToggleKey("\x1b[120;5:2u")).toBe(false);
+      expect(matchesToggleKey("\x1b[120;5:3u")).toBe(false);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      resetToggleKeyCache();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });
 
@@ -493,6 +530,55 @@ describe("editor borrowing", () => {
       expect(harness.componentFactory).toBe(factory);
       expect(harness.editorText).toBe("deferred draft");
       expect(harness.ui.setStatus).toHaveBeenLastCalledWith("pi-input-lock", undefined);
+    });
+  });
+});
+
+describe("press-only toggle lifecycle", () => {
+  const PRESS = "\x1b[105;7u";
+  const REPEAT = "\x1b[105;7:2u";
+  const RELEASE = "\x1b[105;7:3u";
+
+  it("holds OVERRIDE across the release that follows a press", async () => {
+    await withEnabled(async () => {
+      const factoryA: EditorFactory = vi.fn(() => ({ name: "editor-a", getText: () => "" }));
+      const harness = makeHarness(factoryA, { name: "editor-a", getText: () => "" }, "held draft");
+      await startExtension(harness);
+      harness.idle = false;
+      await agentStart(harness);
+      expect(harness.component).toBeInstanceOf(LockedEditor);
+
+      harness.terminal(PRESS);
+      expect(harness.componentFactory).toBe(factoryA);
+      expect(harness.editorText).toBe("held draft");
+      expect(harness.activeInputHandlers.size).toBe(0);
+      const callsAfterPress = harness.setEditorComponent.mock.calls.length;
+
+      // Repeat and release must not toggle back to WATCH: no editor swap,
+      // no listener reinstall, draft and override UI stay put.
+      harness.terminal(REPEAT);
+      harness.terminal(REPEAT);
+      harness.terminal(RELEASE);
+      expect(harness.setEditorComponent.mock.calls.length).toBe(callsAfterPress);
+      expect(harness.componentFactory).toBe(factoryA);
+      expect(harness.editorText).toBe("held draft");
+      expect(harness.activeInputHandlers.size).toBe(0);
+    });
+  });
+
+  it("keeps IDLE a no-op for press, repeat, and release", async () => {
+    await withEnabled(async () => {
+      const factoryA: EditorFactory = vi.fn(() => ({ name: "editor-a", getText: () => "" }));
+      const harness = makeHarness(factoryA, { name: "editor-a", getText: () => "" }, "idle draft");
+      await startExtension(harness);
+
+      harness.terminal(PRESS);
+      harness.terminal(REPEAT);
+      harness.terminal(RELEASE);
+      expect(harness.componentFactory).toBe(factoryA);
+      expect(harness.component).not.toBeInstanceOf(LockedEditor);
+      expect(harness.editorText).toBe("idle draft");
+      expect(harness.activeInputHandlers.size).toBe(0);
     });
   });
 });

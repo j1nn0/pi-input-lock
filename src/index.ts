@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: MIT
  */
 import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { isKeyRelease, isKeyRepeat, matchesKey, visibleWidth, type TUI } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, isKeyRelease, isKeyRepeat, matchesKey, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 
 type EditorFactory = (tui: TUI, theme: any, keybindings: any) => any;
 
@@ -278,6 +278,15 @@ export interface LockedEditorOptions {
 export class LockedEditor extends CustomEditor {
   private readonly accent: (text: string) => string;
   private readonly showHint: boolean;
+  /**
+   * Focusable contract (see Focusable in @earendil-works/pi-tui): the TUI flips
+   * this field when focus moves and the renderer keys marker emission off it.
+   * Overrides the base default of false so a freshly mounted lock surface
+   * declares cursor-anchor eligibility without needing an explicit setFocus.
+   */
+  override focused = true;
+  /** Gate set by the extension while a foreign UI owns focus. */
+  private markerEnabled = true;
 
   constructor(tui: TUI, theme: any, keybindings: any, options: LockedEditorOptions = {}) {
     super(tui, theme, keybindings);
@@ -285,13 +294,21 @@ export class LockedEditor extends CustomEditor {
     this.showHint = options.showHint ?? true;
   }
 
+  /** Turn the cursor anchor on or off without touching TUI focus state. */
+  setMarkerEnabled(enabled: boolean): void {
+    this.markerEnabled = enabled;
+  }
+
   override render(width: number): string[] {
     const text = this.showHint ? `🔒 WATCH · ${getActiveToggleLabel()} to interact` : "🔒 WATCH";
     const label = this.accent(text);
-    const labelWidth = visibleWidth(label);
-    const left = Math.max(0, Math.floor((width - labelWidth) / 2));
+    const left = Math.max(0, Math.floor((width - visibleWidth(label)) / 2));
     const line = " ".repeat(left) + label;
-    return ["", line, ""];
+    // Anchor the hidden write cursor at column 0 of the stable centered row
+    // while this surface owns focus. CURSOR_MARKER is a zero-width APC that
+    // visibleWidth strips, so the centering above is unaffected.
+    const marker = this.focused !== false && this.markerEnabled !== false ? CURSOR_MARKER : "";
+    return ["", marker + line, ""];
   }
 
   override handleInput(_data: string): void {}
@@ -317,6 +334,10 @@ export default function (pi: ExtensionAPI) {
   let hasCurrentEditorFactory = false;
   let currentEditor: object | undefined;
   let currentLockedEditor: object | undefined;
+  // The lock owns the cursor anchor only while its own surface is active and
+  // no foreign UI holds focus; every routing pass re-derives this from
+  // dialogOpen(). See setMarkerEnabled on LockedEditor.
+  let lockMarkerEnabled = true;
   let lastNavData = "";
   let lastNavAt = 0;
   let lastNavSource: InputRouteSource | undefined;
@@ -382,12 +403,26 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
+  /** Best-effort: set the lock editor's marker gate (enabled = anchor allowed). */
+  const syncLockMarker = (enabled: boolean): void => {
+    try {
+      const lockEditor: any = currentLockedEditor;
+      if (lockEditor && typeof lockEditor.setMarkerEnabled === "function") {
+        lockEditor.setMarkerEnabled(enabled);
+      }
+    } catch {
+      // Marker gating is best effort and must never throw into routing.
+    }
+  };
+
   const dialogOpen = (): boolean => {
     try {
       syncCurrentEditor();
       const tui = getTui();
       const editor = currentLockedEditor ?? currentEditor;
       const foreign = editor ? isForeignFocus(focusedComponent(tui), { editor }) : false;
+      lockMarkerEnabled = !foreign;
+      syncLockMarker(lockMarkerEnabled);
       if (
         !foreign &&
         lockState === "IDLE" &&
@@ -482,6 +517,9 @@ export default function (pi: ExtensionAPI) {
     }
 
     // Foreign focus can leave WATCH unborrowed; there is no editor surface to restore.
+    // The outgoing lock surface must not leak a cursor anchor across restore;
+    // a stale mounted frame is gated by the marker flag even if it still renders.
+    syncLockMarker(false);
     if (!hasSavedEditorFactory) return true;
     const text = savedInput;
     const editorFactory = savedEditorFactory;
@@ -553,6 +591,8 @@ export default function (pi: ExtensionAPI) {
         restored = applyLockUI(false);
       }
     }
+    // Idle never owns the anchor: disable it on any still-mounted lock surface.
+    syncLockMarker(false);
 
     disposeInputListener();
     lockState = "IDLE";
@@ -692,6 +732,7 @@ export default function (pi: ExtensionAPI) {
     refreshCtx(ctx);
 
     if (!restored && currentLockedEditor !== undefined && !dialogOpen()) {
+      syncLockMarker(false);
       try {
         ctx.ui.setEditorComponent(undefined);
         currentLockedEditor = undefined;

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, visibleWidth } from "@earendil-works/pi-tui";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -287,10 +287,15 @@ describe("locked editor", () => {
     const row = lines.find((line) => line.includes(label));
 
     expect(lines).toHaveLength(3);
-    expect(row).toBe(" ".repeat(Math.floor((60 - visibleWidth(label)) / 2)) + label);
-    expect(row?.startsWith(" ")).toBe(true);
-    expect(row?.endsWith(" ")).toBe(false);
+    // The cursor anchor leads the stable centered row while focused and armed.
+    expect(row?.startsWith(CURSOR_MARKER)).toBe(true);
+    expect(row?.includes(CURSOR_MARKER)).toBe(true);
+    const stripped = (row as string).slice(CURSOR_MARKER.length);
+    expect(stripped).toBe(" ".repeat(Math.floor((60 - visibleWidth(label)) / 2)) + label);
+    expect(stripped.startsWith(" ")).toBe(true);
+    expect(stripped.endsWith(" ")).toBe(false);
     expect(lines).not.toContain(" ".repeat(60));
+    expect(lines.every((line) => line.split(CURSOR_MARKER).length - 1 <= 1)).toBe(true);
     expect(editor.getText()).toBe("");
     expect(() => editor.handleInput("draft\r")).not.toThrow();
   });
@@ -302,6 +307,45 @@ describe("locked editor", () => {
     expect(lines).toHaveLength(3);
     expect(lines.some((line) => line.includes("🔒 WATCH"))).toBe(true);
     expect(lines.every((line) => !line.includes("to interact"))).toBe(true);
+  });
+
+  it("can gate the cursor anchor off and on again", () => {
+    const editor = new LockedEditor({} as any, theme, {});
+
+    editor.setMarkerEnabled(false);
+    expect(editor.render(60).some((line) => line.includes(CURSOR_MARKER))).toBe(false);
+
+    editor.setMarkerEnabled(true);
+    const enabled = editor.render(60);
+    expect(enabled.some((line) => line.includes(CURSOR_MARKER))).toBe(true);
+    expect(enabled[1]?.startsWith(CURSOR_MARKER)).toBe(true);
+  });
+
+  it("emits no anchor while the TUI has focused something else", () => {
+    const editor = new LockedEditor({} as any, theme, {});
+
+    // The real TUI flips this field when focus moves (Focusable contract).
+    (editor as any).focused = false;
+    expect(editor.render(60).some((line) => line.includes(CURSOR_MARKER))).toBe(false);
+
+    (editor as any).focused = true;
+    expect(editor.render(60)[1]?.startsWith(CURSOR_MARKER)).toBe(true);
+  });
+
+  it("keeps the anchor at the start of the single row when the hint is hidden", () => {
+    const editor = new LockedEditor({} as any, theme, {}, { showHint: false });
+    const lines = editor.render(60);
+    const row = lines.find((line) => line.includes("🔒 WATCH"));
+
+    expect(row).toBeDefined();
+    expect(lines.indexOf(row as string)).toBe(1);
+    expect(row?.startsWith(CURSOR_MARKER)).toBe(true);
+    expect(row?.slice(CURSOR_MARKER.length).trim()).toBe("🔒 WATCH");
+
+    editor.setMarkerEnabled(false);
+    expect(
+      editor.render(60).some((line) => line.includes(CURSOR_MARKER)),
+    ).toBe(false);
   });
 
   it("handles widths smaller than the prompt", () => {
@@ -575,6 +619,34 @@ describe("editor borrowing", () => {
       expect(harness.componentFactory).toBe(factory);
       expect(harness.editorText).toBe("deferred draft");
       expect(harness.ui.setStatus).toHaveBeenLastCalledWith("pi-input-lock", undefined);
+    });
+  });
+
+  it("arms the lock anchor while the lock owns focus and disarms it for a foreign dialog", async () => {
+    await withEnabled(async () => {
+      const factory: EditorFactory = () => ({ name: "editor", getText: () => "" });
+      const harness = makeHarness(factory, { name: "editor", getText: () => "" });
+      await startExtension(harness);
+
+      harness.idle = false;
+      await agentStart(harness);
+      const locked = harness.component as LockedEditor;
+      expect(locked).toBeInstanceOf(LockedEditor);
+
+      // Own focus: a routing pass leaves the anchor armed.
+      harness.clearFocus();
+      harness.terminal("focus-probe");
+      expect(locked.render(60)[1]?.startsWith(CURSOR_MARKER)).toBe(true);
+
+      // Foreign focus: the gate follows on the next routing pass.
+      harness.focus({ name: "ask-user" });
+      harness.terminal("foreign-probe");
+      expect(locked.render(60).some((line) => line.includes(CURSOR_MARKER))).toBe(false);
+
+      // Foreign UI gone: the anchor is armed again.
+      harness.clearFocus();
+      harness.terminal("focus-probe");
+      expect(locked.render(60)[1]?.startsWith(CURSOR_MARKER)).toBe(true);
     });
   });
 });

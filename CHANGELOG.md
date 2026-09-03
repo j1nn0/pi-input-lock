@@ -1,5 +1,8 @@
 # Changelog
 
+## [0.1.5] - 2026-09-03
+
+- Keep the hidden terminal cursor at a stable WATCH position while output is streaming.
 ## [0.1.4] - 2026-09-03
 
 - Prevent terminal cursor flicker while WATCH mode is active.

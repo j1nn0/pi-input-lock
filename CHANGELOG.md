@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.4] - 2026-09-03
+
+- Prevent terminal cursor flicker while WATCH mode is active.
+- Show the active toggle shortcut directly in the WATCH prompt.
+
 ## [0.1.3] - 2026-09-03
 
 - Toggle on key press only: ignore Kitty repeat (event type 2) and release (event type 3) so one physical toggle-key press toggles input-lock mode exactly once.

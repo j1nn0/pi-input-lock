@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  getActiveToggleLabel,
   getToggleKeyId,
   isEnabled,
   isForeignFocus,
@@ -275,16 +277,59 @@ describe("foreign focus", () => {
 });
 
 describe("locked editor", () => {
-  it("renders a centered passive status and ignores input", () => {
+  const theme: any = { borderColor: (text: string) => text, selectList: {} };
+
+  it("renders a centered passive status with the active shortcut and ignores input", () => {
     const tui: any = {};
-    const theme: any = { borderColor: (text: string) => text, selectList: {} };
     const editor = new LockedEditor(tui, theme, {});
     const lines = editor.render(60);
-    const label = "🔒 WATCH · toggle to interact";
+    const label = "🔒 WATCH · Ctrl + Alt + I to interact";
+    const row = lines.find((line) => line.includes(label));
+
     expect(lines).toHaveLength(3);
-    expect(lines[1]).toContain(label);
+    expect(row).toBe(" ".repeat(Math.floor((60 - visibleWidth(label)) / 2)) + label);
+    expect(row?.startsWith(" ")).toBe(true);
+    expect(row?.endsWith(" ")).toBe(false);
+    expect(lines).not.toContain(" ".repeat(60));
     expect(editor.getText()).toBe("");
     expect(() => editor.handleInput("draft\r")).not.toThrow();
+  });
+
+  it("can omit the interaction hint", () => {
+    const editor = new LockedEditor({} as any, theme, {}, { showHint: false });
+    const lines = editor.render(60);
+
+    expect(lines).toHaveLength(3);
+    expect(lines.some((line) => line.includes("🔒 WATCH"))).toBe(true);
+    expect(lines.every((line) => !line.includes("to interact"))).toBe(true);
+  });
+
+  it("handles widths smaller than the prompt", () => {
+    const editor = new LockedEditor({} as any, theme, {});
+
+    expect(() => editor.render(10)).not.toThrow();
+    expect(editor.render(10)).toHaveLength(3);
+  });
+
+  it("uses the configured shortcut in the prompt", () => {
+    const previousHome = process.env.HOME;
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-input-lock-test-"));
+    try {
+      const dir = path.join(tmp, ".pi", "agent", "extensions", "pi-input-lock");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify({ toggleKey: "ctrl+x" }));
+      process.env.HOME = tmp;
+      resetToggleKeyCache();
+
+      const editor = new LockedEditor({} as any, theme, {});
+      expect(getActiveToggleLabel()).toBe("Ctrl + X");
+      expect(editor.render(60).some((line) => line.includes("🔒 WATCH · Ctrl + X to interact"))).toBe(true);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      resetToggleKeyCache();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });
 

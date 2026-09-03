@@ -168,6 +168,25 @@ export function getToggleKeyId(): string {
   return (raw ?? DEFAULT_TOGGLE_KEY).toLowerCase();
 }
 
+export function formatToggleKeyLabel(keyId: string): string {
+  return keyId
+    .split("+")
+    .map((part) => {
+      const trimmed = part.trim();
+      if (trimmed.length === 1) return trimmed.toUpperCase();
+      return trimmed ? trimmed.charAt(0).toUpperCase() + trimmed.slice(1) : trimmed;
+    })
+    .join(" + ");
+}
+
+export function getActiveToggleLabel(): string {
+  try {
+    return formatToggleKeyLabel(getToggleKeyId());
+  } catch {
+    return "Ctrl + Alt + I";
+  }
+}
+
 export function resetToggleKeyCache(): void {
   cachedToggleKeyRaw = undefined;
   hasToggleKeyCache = false;
@@ -267,14 +286,12 @@ export class LockedEditor extends CustomEditor {
   }
 
   override render(width: number): string[] {
-    const text = this.showHint ? "🔒 WATCH · toggle to interact" : "🔒 WATCH";
+    const text = this.showHint ? `🔒 WATCH · ${getActiveToggleLabel()} to interact` : "🔒 WATCH";
     const label = this.accent(text);
     const labelWidth = visibleWidth(label);
     const left = Math.max(0, Math.floor((width - labelWidth) / 2));
     const line = " ".repeat(left) + label;
-    const fill = " ".repeat(Math.max(0, width - visibleWidth(line)));
-    const empty = " ".repeat(Math.max(0, width));
-    return [empty, line + fill, empty];
+    return ["", line, ""];
   }
 
   override handleInput(_data: string): void {}
@@ -733,11 +750,4 @@ export default function (pi: ExtensionAPI) {
     handler: cmdHandler,
   });
 
-  function getActiveToggleLabel(): string {
-    try {
-      return getToggleKeyRawCached() ?? "Ctrl+Alt+I";
-    } catch {
-      return "Ctrl+Alt+I";
-    }
-  }
 }

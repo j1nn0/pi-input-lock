@@ -369,8 +369,18 @@ export default function (pi: ExtensionAPI) {
       syncCurrentEditor();
       const tui = getTui();
       const editor = currentLockedEditor ?? currentEditor;
-      if (!editor) return false;
-      return isForeignFocus(focusedComponent(tui), { editor });
+      const foreign = editor ? isForeignFocus(focusedComponent(tui), { editor }) : false;
+      if (
+        !foreign &&
+        lockState === "IDLE" &&
+        hasSavedEditorFactory &&
+        currentLockedEditor !== undefined
+      ) {
+        try {
+          applyLockUI(false);
+        } catch {}
+      }
+      return foreign;
     } catch {
       return false;
     }
@@ -494,8 +504,7 @@ export default function (pi: ExtensionAPI) {
 
     const wasLocked = isLockedState(lockState);
     const willBeLocked = isLockedState(next);
-    if (wasLocked !== willBeLocked) {
-      if (dialogOpen()) return false;
+    if (wasLocked !== willBeLocked && !dialogOpen()) {
       if (!applyLockUI(willBeLocked)) return false;
     }
 
@@ -515,19 +524,19 @@ export default function (pi: ExtensionAPI) {
 
   const forceIdle = (): boolean => {
     const needsRestore = isLockedState(lockState) || currentLockedEditor !== undefined || hasSavedEditorFactory;
-    if (needsRestore && dialogOpen()) return false;
-
-    const restored = !needsRestore || applyLockUI(false);
-    if (!restored && currentLockedEditor !== undefined) return false;
+    let restored = true;
+    if (needsRestore) {
+      const foreign = dialogOpen();
+      if (foreign) {
+        restored = false;
+      } else if (currentLockedEditor !== undefined || hasSavedEditorFactory) {
+        restored = applyLockUI(false);
+      }
+    }
 
     disposeInputListener();
     lockState = "IDLE";
     setLockStatus("IDLE");
-    if (!restored) {
-      savedInput = "";
-      savedEditorFactory = undefined;
-      hasSavedEditorFactory = false;
-    }
     return restored;
   };
 

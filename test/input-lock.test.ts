@@ -394,10 +394,10 @@ describe("editor borrowing", () => {
     });
   });
 
-  it("defers lifecycle restoration while a foreign component owns focus", async () => {
+  it("finalizes lifecycle state while deferring a foreign-focus editor swap", async () => {
     await withEnabled(async () => {
-      const factory: EditorFactory = () => ({ name: "editor", getText: () => "" });
-      const harness = makeHarness(factory, { name: "editor", getText: () => "" });
+      const factory: EditorFactory = vi.fn(() => ({ name: "editor", getText: () => "" }));
+      const harness = makeHarness(factory, { name: "editor", getText: () => "" }, "deferred draft");
       await startExtension(harness);
       harness.idle = false;
       await agentStart(harness);
@@ -408,12 +408,28 @@ describe("editor borrowing", () => {
 
       await agentSettled(harness);
       expect(harness.component).toBe(locked);
-      expect(harness.activeInputHandlers.size).toBe(1);
-
-      harness.clearFocus();
-      await agentSettled(harness);
-      expect(harness.component).not.toBe(locked);
       expect(harness.activeInputHandlers.size).toBe(0);
+      expect(harness.ui.setStatus).toHaveBeenLastCalledWith("pi-input-lock", undefined);
+
+      // A toggle remains a no-op while the foreign UI owns focus.
+      harness.terminal("\x1b\x09");
+      expect(harness.component).toBe(locked);
+      expect(harness.componentFactory).not.toBe(factory);
+
+      // The first key after focus returns drains the deferred restore. It must
+      // not turn the already-settled IDLE state into OVERRIDE.
+      harness.clearFocus();
+      harness.terminal("\x1b\x09");
+      expect(harness.component).not.toBe(locked);
+      expect(harness.componentFactory).toBe(factory);
+      expect(harness.editorText).toBe("deferred draft");
+      expect(harness.activeInputHandlers.size).toBe(0);
+
+      // A repeated lifecycle event is idempotent and is not the restore trigger.
+      await agentSettled(harness);
+      expect(harness.componentFactory).toBe(factory);
+      expect(harness.editorText).toBe("deferred draft");
+      expect(harness.ui.setStatus).toHaveBeenLastCalledWith("pi-input-lock", undefined);
     });
   });
 });

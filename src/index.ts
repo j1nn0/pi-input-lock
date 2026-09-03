@@ -7,6 +7,7 @@
  * submit text or trigger an action.
  *
  * Copyright (c) 2026 inobit
+ * Copyright (c) 2026 j1nn0
  * SPDX-License-Identifier: MIT
  */
 import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";

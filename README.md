@@ -63,6 +63,7 @@ config and wins when both files exist (settings are never merged).
 
 `WATCH`/`OVERRIDE`: `/input-lock` or `/lock` also toggles. To turn manual `WATCH`
 on/off while the agent is stopped, use the configured toggle key.
+`/input-lock status` reports the current lock state, agent activity, unlock policy, tool-expand setting, and toggle key without changing the lock state. `/lock status` is also supported.
 
 States are lifecycle-aware:
 

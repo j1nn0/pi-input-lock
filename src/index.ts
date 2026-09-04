@@ -917,7 +917,13 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_end" as any, async (_event: any, ctx: ExtensionContext) => refreshCtx(ctx));
   pi.on("agent_settled" as any, handleAgentSettled as any);
 
-  const cmdHandler = async (_args: string, ctx: ExtensionContext): Promise<void> => {
+  const cmdHandler = async (args: string, ctx: ExtensionContext): Promise<void> => {
+    if (typeof args === "string" && args.trim().toLowerCase() === "status") {
+      const agentIdle = contextIsIdle(ctx);
+      const agentWord = agentIdle === false ? "active" : agentIdle === true ? "inactive" : "unknown";
+      ctx.ui.notify(`State: ${lockState} · Agent: ${agentWord} · Unlock policy: ${getUnlockPolicyCached()} · Tool expand: ${getAllowToolExpandInWatchCached() ? "enabled" : "disabled"} · Toggle: ${getActiveToggleLabel()}`, "info");
+      return;
+    }
     if (lockState === "IDLE") {
       ctx.ui.notify("Input lock is only available while an agent is running.", "info");
       return;

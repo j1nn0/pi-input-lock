@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.7] - 2026-09-04
+
+- Add JSON Schema support for pi-input-lock configuration.
+- Add `/input-lock status` for inspecting the current lock state and configuration. `/lock status` is also supported.
+
 ## [0.1.6] - 2026-09-04
 
 - Add opt-in tool expansion during `WATCH` using the configured `app.tools.expand` action.

@@ -1021,3 +1021,122 @@ describe("runtime activation", () => {
     expect(pi.registerCommand).not.toHaveBeenCalled();
   });
 });
+
+
+describe("command status", () => {
+  it("reports default status without changing the lock surface", async () => {
+    await withHomeConfigFiles({ canonical: {} }, async () => {
+      await withEnabled(async () => {
+        const harness = makeHarness();
+        await startExtension(harness);
+        const component = harness.component;
+        const componentFactory = harness.componentFactory;
+        const editorText = harness.editorText;
+
+        await harness.commands[0]!.handler("status", harness.ctx);
+
+        expect(harness.ui.notify).toHaveBeenCalledTimes(1);
+        expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("State: IDLE"), "info");
+        expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Agent: inactive"), "info");
+        expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Unlock policy: agent-settled"), "info");
+        expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Tool expand: disabled"), "info");
+        expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Toggle: Ctrl + Alt + I"), "info");
+        expect(harness.component).toBe(component);
+        expect(harness.componentFactory).toBe(componentFactory);
+        expect(harness.editorText).toBe(editorText);
+        expect(harness.activeInputHandlers.size).toBe(0);
+      });
+    });
+  });
+
+  it("reports active WATCH status without changing the lock surface", async () => {
+    await withEnabled(async () => {
+      const factory: EditorFactory = () => ({ name: "editor", getText: () => "" });
+      const harness = makeHarness(factory, { name: "editor", getText: () => "" });
+      await startExtension(harness);
+      harness.idle = false;
+      await agentStart(harness);
+      const component = harness.component;
+      const componentFactory = harness.componentFactory;
+      const editorText = harness.editorText;
+      const activeHandlers = harness.activeInputHandlers.size;
+
+      await harness.commands[0]!.handler("status", harness.ctx);
+
+      expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("State: WATCH"), "info");
+      expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Agent: active"), "info");
+      expect(harness.component).toBe(component);
+      expect(harness.componentFactory).toBe(componentFactory);
+      expect(harness.editorText).toBe(editorText);
+      expect(harness.activeInputHandlers.size).toBe(activeHandlers);
+    });
+  });
+
+  it("reports custom policy, tool expansion, and toggle settings through /lock", async () => {
+    await withHomeConfigFiles(
+      { canonical: { toggleKey: "ctrl+x", allowToolExpandInWatch: true, unlockPolicy: "manual" } },
+      async () => {
+        await withEnabled(async () => {
+          const harness = makeHarness();
+          await startExtension(harness);
+          expect(harness.commands[1]!.handler).toBe(harness.commands[0]!.handler);
+
+          await harness.commands[1]!.handler("status", harness.ctx);
+
+          expect(harness.ui.notify).toHaveBeenCalledTimes(1);
+          expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Unlock policy: manual"), "info");
+          expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Tool expand: enabled"), "info");
+          expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Toggle: Ctrl + X"), "info");
+        });
+      },
+    );
+  });
+
+  it("reports unknown agent activity when the context has no idle check", async () => {
+    await withEnabled(async () => {
+      const harness = makeHarness();
+      await startExtension(harness);
+      const statusContext = { ...harness.ctx, isIdle: undefined };
+
+      await harness.commands[0]!.handler("status", statusContext);
+
+      expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Agent: unknown"), "info");
+      expect(harness.activeInputHandlers.size).toBe(0);
+    });
+  });
+
+  it("keeps non-status arguments on the existing toggle path", async () => {
+    await withEnabled(async () => {
+      const factory: EditorFactory = () => ({ name: "editor", getText: () => "" });
+      const harness = makeHarness(factory, { name: "editor", getText: () => "" });
+      await startExtension(harness);
+      const handler = harness.commands[0]!.handler;
+      const initialComponent = harness.component;
+      const initialComponentFactory = harness.componentFactory;
+      const initialEditorText = harness.editorText;
+
+      await handler("", harness.ctx);
+
+      expect(harness.ui.notify).toHaveBeenCalledWith("Input lock is only available while an agent is running.", "info");
+      expect(harness.component).toBe(initialComponent);
+      expect(harness.componentFactory).toBe(initialComponentFactory);
+      expect(harness.editorText).toBe(initialEditorText);
+      expect(harness.activeInputHandlers.size).toBe(0);
+
+      harness.idle = false;
+      await agentStart(harness);
+      harness.ui.notify.mockClear();
+
+      await handler("", harness.ctx);
+      expect(harness.component).not.toBeInstanceOf(LockedEditor);
+      expect(harness.activeInputHandlers.size).toBe(0);
+
+      await handler("status", harness.ctx);
+      expect(harness.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("State: OVERRIDE"), "info");
+
+      await handler("bogus", harness.ctx);
+      expect(harness.component).toBeInstanceOf(LockedEditor);
+      expect(harness.activeInputHandlers.size).toBe(1);
+    });
+  });
+});

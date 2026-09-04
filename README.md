@@ -3,10 +3,12 @@
 A small Pi extension that protects interactive input while an agent is running.
 It is opt-in: the parent process is unchanged unless `PI_INPUT_LOCK=1` is set.
 
-In `WATCH`, text, submit keys, paste, and Pi application shortcuts are consumed.
-CSI and SSU arrow sequences continue to reach the focused component, and foreign
-interactive UIs such as permission dialogs always receive their input. The
-original editor and draft text are restored when the lock is released.
+In `WATCH`, text input, submit, paste, and normal Pi shortcuts are blocked: typed
+text is not inserted, submit does nothing, and shortcuts do not run. Arrow-key
+navigation still reaches the focused component, and when a foreign interactive
+UI (for example a permission dialog from Pi or another extension) has focus, it
+keeps working and its input is not blocked. The original editor and draft text
+are restored when the lock is released.
 
 ## Installation
 
@@ -34,7 +36,7 @@ The default toggle is `ctrl+alt+i`. Configure the extension in
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `toggleKey` | string | `ctrl+alt+i` | Shortcut used to toggle the lock. |
-| `allowToolExpandInWatch` | boolean | `false` | Allow the configured `app.tools.expand` action during `WATCH`. |
+| `allowToolExpandInWatch` | boolean | `false` | When enabled, the Pi `app.tools.expand` keybinding (default Ctrl+O, follows user remaps) still expands/collapses tool output during `WATCH`. |
 | `unlockPolicy` | `agent-settled` \| `manual` | `agent-settled` | Choose automatic or manual unlock after settlement. |
 
 A recommended combined configuration:
@@ -47,13 +49,17 @@ A recommended combined configuration:
 }
 ```
 
+The tool-expand exception follows the Pi `app.tools.expand` keybinding, so a
+remapped key keeps working; it is not a hardcoded Ctrl+O.
+
 Configuration is cached for the lifetime of the process; restart Pi after changing it.
 
 `~/.pi/agent/extensions/pi-input-lock/config.json` is still accepted as a
 legacy fallback, but `~/.pi/agent/pi-input-lock.json` is the canonical user
 config and wins when both files exist (settings are never merged).
 
-The same action is available as `/input-lock` or `/lock`.
+`WATCH`/`OVERRIDE`: `/input-lock` or `/lock` also toggles. To turn manual `WATCH`
+on/off while the agent is stopped, use the configured toggle key.
 
 States are lifecycle-aware:
 
@@ -63,10 +69,19 @@ States are lifecycle-aware:
 
 With the default `agent-settled` policy, agent start enters `WATCH` and agent
 settlement returns from either active state to `IDLE`. With `manual`, settlement
-keeps `WATCH` until an inactive toggle restores the editor and draft. Manual mode
-is not forced on at startup (the extension still starts in `IDLE`), and session
-boundaries or reset events always return to `IDLE` rather than remaining sticky.
-If the runtime cannot confirm that an agent is active, it fails open to `IDLE`.
+keeps `WATCH` (from `OVERRIDE` it still returns to `IDLE`) until an inactive
+toggle restores the editor and draft. Manual mode is not forced on at startup
+(the extension still starts in `IDLE`), and session boundaries or reset events
+always return to `IDLE` rather than remaining sticky. With the default
+`agent-settled` policy, if the runtime cannot confirm that an agent is active,
+it fails open to `IDLE`. Under `manual`, `WATCH` intentionally persists after
+settlement until explicitly toggled off.
+
+Known operational limitation (not a bug): with `unlockPolicy: manual`, `WATCH`
+persists after the agent stops, so terminal-injected input (for example Herdr
+sending the next prompt as key input) is still blocked. Workaround: 1. press the
+toggle key to return `WATCH` → `IDLE`; 2. send the prompt from Herdr; 3.
+`agent_start` re-enters `WATCH` automatically.
 
 ## Development
 

@@ -39,11 +39,14 @@ export PI_INPUT_LOCK=1
 
 ```json
 {
+  "$schema": "https://raw.githubusercontent.com/j1nn0/pi-input-lock/main/pi-input-lock.schema.json",
   "toggleKey": "ctrl+alt+i",
   "allowToolExpandInWatch": true,
   "unlockPolicy": "manual"
 }
 ```
+
+`pi-input-lock.schema.json` を利用すると、対応するエディターで設定項目の補完や検証を利用できます。
 
 設定はプロセスの存続中キャッシュされるため、変更後は Pi を再起動してください。
 

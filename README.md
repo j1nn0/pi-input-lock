@@ -43,11 +43,14 @@ A recommended combined configuration:
 
 ```json
 {
+  "$schema": "https://raw.githubusercontent.com/j1nn0/pi-input-lock/main/pi-input-lock.schema.json",
   "toggleKey": "ctrl+alt+i",
   "allowToolExpandInWatch": true,
   "unlockPolicy": "manual"
 }
 ```
+
+JSON-aware editors can use pi-input-lock.schema.json for completion and validation.
 
 The tool-expand exception follows the Pi `app.tools.expand` keybinding, so a
 remapped key keeps working; it is not a hardcoded Ctrl+O.

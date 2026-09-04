@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/j1nn0/pi-input-lock/main/pi-input-lock.schema.json",
+  "title": "pi-input-lock configuration",
+  "description": "Configuration for @j1nn0/pi-input-lock.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string", "format": "uri", "description": "JSON Schema used to validate this configuration file." },
+    "toggleKey": { "type": "string", "pattern": "\\S", "default": "ctrl+alt+i", "description": "Keybinding used to toggle the input lock." },
+    "allowToolExpandInWatch": { "type": "boolean", "default": false, "description": "Allows the Pi app.tools.expand action while WATCH is active." },
+    "unlockPolicy": { "type": "string", "enum": ["agent-settled", "manual"], "default": "agent-settled", "description": "Controls whether WATCH unlocks when the agent settles or remains locked until manually toggled." }
+  }
+}

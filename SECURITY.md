@@ -9,6 +9,6 @@ Please always use the latest release.
 
 **Please do not report security vulnerabilities through public GitHub issues.**
 
-Instead, report a vulnerability through GitHub's security advisory feature at はhttps://github.com/j1nn0/pi-input-lock/security/advisories/new.
+Instead, report a vulnerability through GitHub's security advisory feature at https://github.com/j1nn0/pi-input-lock/security/advisories/new.
 
 You can expect an initial response within a few days. If for some reason you do not, please follow up with a comment on the advisory to ensure we received your original report.

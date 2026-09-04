@@ -5,7 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import {
   getActiveToggleLabel,
+  getAllowToolExpandInWatchCached,
   getToggleKeyId,
+  getUnlockPolicyCached,
   isEnabled,
   isForeignFocus,
   isLockedState,
@@ -13,6 +15,8 @@ import {
   LockedEditor,
   matchesToggleKey,
   nextState,
+  nextStateWithPolicy,
+  resetInputLockConfigCache,
   resetToggleKeyCache,
   type LockState,
 } from "../src/index.ts";
@@ -39,6 +43,11 @@ function makeHarness(initialFactory?: EditorFactory, initialComponent?: any, ini
 
   const theme: any = { borderColor: (text: string) => text, selectList: {} };
   const keybindings: any = {};
+  let toolsExpanded = false;
+  const getToolsExpanded = vi.fn(() => toolsExpanded);
+  const setToolsExpanded = vi.fn((value: boolean) => {
+    toolsExpanded = value;
+  });
   const tui: any = {
     addInputListener: vi.fn((handler: Function) => {
       activeInputHandlers.add(handler);
@@ -86,6 +95,8 @@ function makeHarness(initialFactory?: EditorFactory, initialComponent?: any, ini
     },
     notify: vi.fn(),
     setStatus: vi.fn(),
+    getToolsExpanded,
+    setToolsExpanded,
   };
   const ctx: any = {
     ui,
@@ -104,6 +115,7 @@ function makeHarness(initialFactory?: EditorFactory, initialComponent?: any, ini
     ui,
     tui,
     defaultEditor,
+    keybindings,
     setEditorComponent,
     inputDisposers,
     terminalDisposers,
@@ -122,6 +134,9 @@ function makeHarness(initialFactory?: EditorFactory, initialComponent?: any, ini
     },
     set idle(value: boolean) {
       idle = value;
+    },
+    get toolsExpanded() {
+      return toolsExpanded;
     },
     set failFactory(value: EditorFactory | undefined) {
       failFactory = value;
@@ -157,6 +172,45 @@ async function withEnabled<T>(run: () => Promise<T> | T): Promise<T> {
     if (previous === undefined) delete process.env.PI_INPUT_LOCK;
     else process.env.PI_INPUT_LOCK = previous;
   }
+}
+
+
+async function withHomeConfigFiles<T>(
+  files: { canonical?: Record<string, unknown> | string; legacy?: Record<string, unknown> | string },
+  run: () => Promise<T> | T,
+): Promise<T> {
+  const previousHome = process.env.HOME;
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-input-lock-test-"));
+  try {
+    if (files.canonical !== undefined) {
+      const dir = path.join(tmp, ".pi", "agent");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, "pi-input-lock.json"),
+        typeof files.canonical === "string" ? files.canonical : JSON.stringify(files.canonical),
+      );
+    }
+    if (files.legacy !== undefined) {
+      const dir = path.join(tmp, ".pi", "agent", "extensions", "pi-input-lock");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "config.json"), typeof files.legacy === "string" ? files.legacy : JSON.stringify(files.legacy));
+    }
+    process.env.HOME = tmp;
+    resetInputLockConfigCache();
+    return await run();
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    resetInputLockConfigCache();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+async function withHomeConfig<T>(
+  config: Record<string, unknown> | string | undefined,
+  run: () => Promise<T> | T,
+): Promise<T> {
+  return withHomeConfigFiles(config === undefined ? {} : { legacy: config }, run);
 }
 
 async function startExtension(harness: Harness): Promise<void> {
@@ -211,6 +265,42 @@ describe("lock state", () => {
     const states: LockState[] = ["IDLE", "WATCH", "OVERRIDE"];
     expect(states.map(isLockedState)).toEqual([false, true, false]);
   });
+
+
+  it("preserves every v0.1.5 transition under the default policy", () => {
+    const cases = [
+      ["IDLE", "toggle", "IDLE"],
+      ["WATCH", "toggle", "OVERRIDE"],
+      ["OVERRIDE", "toggle", "WATCH"],
+      ["IDLE", "agent_start", "WATCH"],
+      ["OVERRIDE", "agent_start", "OVERRIDE"],
+      ["WATCH", "agent_settled", "IDLE"],
+    ] as const;
+
+    for (const [state, event, expected] of cases) {
+      expect(nextStateWithPolicy(state, event, "agent-settled", false)).toBe(expected);
+    }
+  });
+
+  it("applies the manual unlock policy matrix", () => {
+    const cases = [
+      ["IDLE", "agent_start", true, "WATCH"],
+      ["WATCH", "agent_start", true, "WATCH"],
+      ["OVERRIDE", "agent_start", true, "OVERRIDE"],
+      ["IDLE", "agent_settled", false, "IDLE"],
+      ["WATCH", "agent_settled", false, "WATCH"],
+      ["OVERRIDE", "agent_settled", false, "IDLE"],
+      ["WATCH", "toggle", true, "OVERRIDE"],
+      ["WATCH", "toggle", false, "IDLE"],
+      ["OVERRIDE", "toggle", true, "WATCH"],
+      ["IDLE", "toggle", true, "IDLE"],
+      ["IDLE", "toggle", false, "WATCH"],
+    ] as const;
+
+    for (const [state, event, agentActive, expected] of cases) {
+      expect(nextStateWithPolicy(state, event, "manual", agentActive)).toBe(expected);
+    }
+  });
 });
 
 describe("toggle key", () => {
@@ -253,6 +343,122 @@ describe("toggle key", () => {
       resetToggleKeyCache();
       fs.rmSync(tmp, { recursive: true, force: true });
     }
+  });
+});
+
+
+describe("configuration", () => {
+  it("uses the default policy and disables tool expansion without a config", async () => {
+    await withHomeConfig(undefined, () => {
+      expect(getAllowToolExpandInWatchCached()).toBe(false);
+      expect(getUnlockPolicyCached()).toBe("agent-settled");
+    });
+  });
+
+  it("merges a partial config with the defaults", async () => {
+    await withHomeConfig({ allowToolExpandInWatch: true }, () => {
+      expect(getAllowToolExpandInWatchCached()).toBe(true);
+      expect(getUnlockPolicyCached()).toBe("agent-settled");
+      expect(getToggleKeyId()).toBe("ctrl+alt+i");
+    });
+  });
+
+  it("normalizes non-boolean tool expansion values to false", async () => {
+    await withHomeConfig({ allowToolExpandInWatch: "true" }, () => {
+      expect(getAllowToolExpandInWatchCached()).toBe(false);
+    });
+  });
+
+  it("accepts manual and agent-settled policies and defaults invalid values", async () => {
+    await withHomeConfig({ unlockPolicy: "manual" }, () => {
+      expect(getUnlockPolicyCached()).toBe("manual");
+    });
+    await withHomeConfig({ unlockPolicy: "agent-settled" }, () => {
+      expect(getUnlockPolicyCached()).toBe("agent-settled");
+    });
+    await withHomeConfig({ unlockPolicy: "invalid" }, () => {
+      expect(getUnlockPolicyCached()).toBe("agent-settled");
+    });
+  });
+
+  it("uses defaults for malformed configuration", async () => {
+    await withHomeConfig("{", () => {
+      expect(getAllowToolExpandInWatchCached()).toBe(false);
+      expect(getUnlockPolicyCached()).toBe("agent-settled");
+    });
+  });
+});
+
+describe("user config paths", () => {
+  it("loads the canonical user config", async () => {
+    await withHomeConfigFiles(
+      { canonical: { toggleKey: "ctrl+q", allowToolExpandInWatch: true, unlockPolicy: "manual" } },
+      () => {
+        expect(getToggleKeyId()).toBe("ctrl+q");
+        expect(getAllowToolExpandInWatchCached()).toBe(true);
+        expect(getUnlockPolicyCached()).toBe("manual");
+      },
+    );
+  });
+
+  it("loads the legacy fallback when only it exists", async () => {
+    await withHomeConfigFiles(
+      { legacy: { toggleKey: "ctrl+x", allowToolExpandInWatch: true, unlockPolicy: "manual" } },
+      () => {
+        expect(getToggleKeyId()).toBe("ctrl+x");
+        expect(getAllowToolExpandInWatchCached()).toBe(true);
+        expect(getUnlockPolicyCached()).toBe("manual");
+      },
+    );
+  });
+
+  it("prefers the canonical config over legacy without merging", async () => {
+    await withHomeConfigFiles(
+      {
+        canonical: { toggleKey: "ctrl+x" },
+        legacy: { toggleKey: "ctrl+y", allowToolExpandInWatch: true, unlockPolicy: "manual" },
+      },
+      () => {
+        expect(getToggleKeyId()).toBe("ctrl+x");
+        expect(getAllowToolExpandInWatchCached()).toBe(false);
+        expect(getUnlockPolicyCached()).toBe("agent-settled");
+      },
+    );
+  });
+
+  it("uses defaults for a malformed canonical config", async () => {
+    await withHomeConfigFiles({ canonical: "{" }, () => {
+      expect(getToggleKeyId()).toBe("ctrl+alt+i");
+      expect(getAllowToolExpandInWatchCached()).toBe(false);
+      expect(getUnlockPolicyCached()).toBe("agent-settled");
+    });
+  });
+
+  it("does not fall back to legacy when the canonical config is malformed", async () => {
+    await withHomeConfigFiles(
+      {
+        canonical: "{",
+        legacy: { toggleKey: "ctrl+x", allowToolExpandInWatch: true, unlockPolicy: "manual" },
+      },
+      () => {
+        expect(getToggleKeyId()).toBe("ctrl+alt+i");
+        expect(getAllowToolExpandInWatchCached()).toBe(false);
+        expect(getUnlockPolicyCached()).toBe("agent-settled");
+      },
+    );
+  });
+
+  it("loads a combined config from the canonical path", async () => {
+    await withHomeConfigFiles(
+      {
+        canonical: { toggleKey: "ctrl+x", allowToolExpandInWatch: true, unlockPolicy: "manual" },
+      },
+      () => {
+        expect(getToggleKeyId()).toBe("ctrl+x");
+        expect(getAllowToolExpandInWatchCached()).toBe(true);
+        expect(getUnlockPolicyCached()).toBe("manual");
+      },
+    );
   });
 });
 
@@ -651,6 +857,63 @@ describe("editor borrowing", () => {
   });
 });
 
+
+describe("manual unlock policy", () => {
+  it("keeps settled WATCH until an inactive toggle restores the editor and draft", async () => {
+    await withHomeConfig({ unlockPolicy: "manual" }, async () => {
+      await withEnabled(async () => {
+        const customFactory: EditorFactory = vi.fn(() => ({ name: "custom-editor", getText: () => "" }));
+        const customEditor = { name: "custom-editor", getText: () => "" };
+        const harness = makeHarness(customFactory, customEditor, "manual draft");
+
+        await startExtension(harness);
+        expect(harness.component).toBe(customEditor);
+
+        harness.idle = false;
+        await agentStart(harness);
+        expect(harness.component).toBeInstanceOf(LockedEditor);
+        expect(harness.editorText).toBe("");
+        expect(harness.activeInputHandlers.size).toBe(1);
+
+        harness.idle = true;
+        await agentSettled(harness);
+        expect(harness.component).toBeInstanceOf(LockedEditor);
+        expect(harness.componentFactory).not.toBe(customFactory);
+        expect(harness.editorText).toBe("");
+        expect(harness.activeInputHandlers.size).toBe(1);
+        expect(harness.ui.setStatus).toHaveBeenLastCalledWith(
+          "pi-input-lock",
+          expect.stringContaining("🔒 WATCH"),
+        );
+
+        harness.terminal("\x1b\x09");
+        expect(harness.componentFactory).toBe(customFactory);
+        expect(harness.component).not.toBeInstanceOf(LockedEditor);
+        expect(harness.editorText).toBe("manual draft");
+        expect(harness.activeInputHandlers.size).toBe(0);
+      });
+    });
+  });
+
+  it("allows an inactive IDLE toggle to enter WATCH", async () => {
+    await withHomeConfig({ unlockPolicy: "manual" }, async () => {
+      await withEnabled(async () => {
+        const customFactory: EditorFactory = () => ({ name: "custom-editor", getText: () => "" });
+        const customEditor = { name: "custom-editor", getText: () => "" };
+        const harness = makeHarness(customFactory, customEditor, "idle manual draft");
+
+        await startExtension(harness);
+        expect(harness.component).toBe(customEditor);
+        harness.terminal("\x1b\x09");
+
+        expect(harness.component).toBeInstanceOf(LockedEditor);
+        expect(harness.editorText).toBe("");
+        expect(harness.activeInputHandlers.size).toBe(1);
+      });
+    });
+  });
+});
+
 describe("press-only toggle lifecycle", () => {
   const PRESS = "\x1b[105;7u";
   const REPEAT = "\x1b[105;7:2u";
@@ -696,6 +959,36 @@ describe("press-only toggle lifecycle", () => {
       expect(harness.component).not.toBeInstanceOf(LockedEditor);
       expect(harness.editorText).toBe("idle draft");
       expect(harness.activeInputHandlers.size).toBe(0);
+    });
+  });
+});
+
+
+describe("tool expansion wiring", () => {
+  it("uses the configured action matcher and display-only fallback", async () => {
+    await withHomeConfig({ allowToolExpandInWatch: true }, async () => {
+      await withEnabled(async () => {
+        const factory: EditorFactory = () => ({ name: "editor", getText: () => "" });
+        const harness = makeHarness(factory, { name: "editor", getText: () => "" }, "tool draft");
+        harness.keybindings.matches = vi.fn(
+          (data: string, action: string) => action === "app.tools.expand" && data === "\x0f",
+        );
+
+        await startExtension(harness);
+        harness.idle = false;
+        await agentStart(harness);
+
+        expect(harness.terminal("\x0f")).toEqual({ consume: true });
+        expect(harness.input("\x0f")).toEqual([{ consume: true }]);
+        expect(harness.ui.setToolsExpanded).toHaveBeenCalledTimes(1);
+        expect(harness.ui.setToolsExpanded).toHaveBeenCalledWith(true);
+        expect(harness.toolsExpanded).toBe(true);
+        expect(harness.editorText).toBe("");
+
+        harness.terminal("\x1b[111;1:2u");
+        harness.terminal("\x1b[111;1:3u");
+        expect(harness.ui.setToolsExpanded).toHaveBeenCalledTimes(1);
+      });
     });
   });
 });

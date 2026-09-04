@@ -1,8 +1,15 @@
 # Changelog
 
+## [0.1.6] - 2026-09-04
+
+- Add opt-in tool expansion during `WATCH` using the configured `app.tools.expand` action.
+- Add the `manual` unlock policy, which keeps `WATCH` after agent settlement until an inactive toggle restores input.
+- Document the new configuration options and release metadata.
+
 ## [0.1.5] - 2026-09-03
 
 - Keep the hidden terminal cursor at a stable WATCH position while output is streaming.
+
 ## [0.1.4] - 2026-09-03
 
 - Prevent terminal cursor flicker while WATCH mode is active.

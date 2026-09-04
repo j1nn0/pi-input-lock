@@ -9,7 +9,12 @@ import {
 
 function makeHarness(overrides: Partial<InputLockRouterIO> = {}) {
   const state = { locked: true, foreign: false };
-  const calls = { toggle: vi.fn(), render: vi.fn(), duplicate: vi.fn((..._args: any[]) => false) };
+  const calls = {
+    toggle: vi.fn(),
+    render: vi.fn(),
+    expand: vi.fn(),
+    duplicate: vi.fn((..._args: any[]) => false),
+  };
   const tui: any = { requestRender: calls.render };
   const io: InputLockRouterIO = {
     isLocked: () => state.locked,
@@ -23,6 +28,7 @@ function makeHarness(overrides: Partial<InputLockRouterIO> = {}) {
       calls.toggle();
       state.locked = false;
     },
+    expandTools: calls.expand,
     requestRender: (target) => target?.requestRender?.(),
     ...overrides,
   };
@@ -72,6 +78,7 @@ describe("router with owned focus", () => {
     }
   });
 
+
   it("passes CSI and SSU arrow sequences through", () => {
     const h = makeHarness();
     for (const data of ["\x1b[A", "\x1b[B", "\x1bOA", "\x1bOB", "\x1b[1;5C"]) {
@@ -95,6 +102,78 @@ describe("router with owned focus", () => {
     expect(h.input("x")).toEqual({ consume: true });
     expect(h.calls.toggle).not.toHaveBeenCalled();
     expect(duplicate).toHaveBeenCalledWith("x", "input");
+  });
+});
+
+
+describe("tool expansion while locked", () => {
+  const PRESS = "\x1b[111;1u";
+  const REPEAT = "\x1b[111;1:2u";
+  const RELEASE = "\x1b[111;1:3u";
+
+  it("blocks expansion by default", () => {
+    const h = makeHarness();
+
+    expect(h.input(PRESS)).toEqual({ consume: true });
+    expect(h.terminal(PRESS)).toEqual({ consume: true });
+    expect(h.calls.expand).not.toHaveBeenCalled();
+  });
+
+  it("dispatches an injected expand action exactly once across both channels", () => {
+    const matcher = vi.fn(() => true);
+    const h = makeHarness({ matchesToolExpand: matcher });
+
+    expect(h.input(PRESS)).toEqual({ consume: true });
+    expect(h.calls.expand).not.toHaveBeenCalled();
+    expect(h.terminal(PRESS)).toEqual({ consume: true });
+    expect(h.calls.expand).toHaveBeenCalledTimes(1);
+
+    for (const data of [REPEAT, REPEAT, RELEASE]) {
+      expect(h.input(data)).toEqual({ consume: true });
+      expect(h.terminal(data)).toEqual({ consume: true });
+    }
+    expect(h.calls.expand).toHaveBeenCalledTimes(1);
+    expect(matcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not dispatch for repeats or releases without a press", () => {
+    const h = makeHarness({ matchesToolExpand: () => true });
+
+    for (const data of [REPEAT, RELEASE]) {
+      expect(h.input(data)).toEqual({ consume: true });
+      expect(h.terminal(data)).toEqual({ consume: true });
+    }
+    expect(h.calls.expand).not.toHaveBeenCalled();
+  });
+
+  it("keeps ordinary text and submit input blocked", () => {
+    const h = makeHarness({ matchesToolExpand: () => false });
+
+    for (const data of ["text", "\r"]) {
+      expect(h.input(data)).toEqual({ consume: true });
+    }
+    expect(h.calls.expand).not.toHaveBeenCalled();
+  });
+
+  it("leaves an expand key to a foreign UI", () => {
+    const h = makeHarness({ matchesToolExpand: () => true });
+    h.state.foreign = true;
+
+    expect(h.terminal(PRESS)).toBeUndefined();
+    expect(h.input(PRESS)).toBeUndefined();
+    expect(h.calls.expand).not.toHaveBeenCalled();
+  });
+
+  it("uses the injected action match rather than hardcoded ctrl+o", () => {
+    const remapped = makeHarness({
+      matchesToolExpand: (data) => data === "\x0f",
+    });
+    expect(remapped.terminal("\x0f")).toEqual({ consume: true });
+    expect(remapped.calls.expand).toHaveBeenCalledTimes(1);
+
+    const rawCtrlO = makeHarness({ matchesToolExpand: () => false });
+    expect(rawCtrlO.terminal("\x0f")).toEqual({ consume: true });
+    expect(rawCtrlO.calls.expand).not.toHaveBeenCalled();
   });
 });
 

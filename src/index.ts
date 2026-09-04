@@ -25,6 +25,10 @@ export function isEnabled(): boolean {
 export type LockState = "IDLE" | "WATCH" | "OVERRIDE";
 export type LockEvent = "toggle" | "agent_start" | "agent_settled";
 
+export type UnlockPolicy = "agent-settled" | "manual";
+export const DEFAULT_UNLOCK_POLICY: UnlockPolicy = "agent-settled";
+export const DEFAULT_ALLOW_TOOL_EXPAND_IN_WATCH = false;
+
 /**
  * Pure state transition used by the extension and by a future lifecycle hook.
  * WATCH is the only state that blocks input. OVERRIDE is an intentional,
@@ -40,6 +44,27 @@ export function nextState(state: LockState, event: LockEvent): LockState {
       return state === "OVERRIDE" ? "OVERRIDE" : "WATCH";
     case "agent_settled":
       return "IDLE";
+  }
+}
+
+
+export function nextStateWithPolicy(
+  state: LockState,
+  event: LockEvent,
+  policy: UnlockPolicy,
+  agentActive: boolean,
+): LockState {
+  if (policy !== "manual") return nextState(state, event);
+
+  switch (event) {
+    case "agent_start":
+      return state === "OVERRIDE" ? "OVERRIDE" : "WATCH";
+    case "agent_settled":
+      return state === "WATCH" ? "WATCH" : "IDLE";
+    case "toggle":
+      if (state === "WATCH") return agentActive ? "OVERRIDE" : "IDLE";
+      if (state === "OVERRIDE") return "WATCH";
+      return agentActive ? "IDLE" : "WATCH";
   }
 }
 
@@ -100,13 +125,18 @@ export interface InputLockRouterIO {
   dialogOpen: () => boolean;
   getTui?: () => any;
   isDuplicateNav?: (data: string, source: InputRouteSource) => boolean;
+  matchesToolExpand?: (data: string) => boolean;
+  expandTools?: () => void;
   toggle: () => void;
   requestRender?: (tui: any) => void;
 }
 const DEFAULT_TOGGLE_KEY = "ctrl+alt+i";
 let cachedToggleKeyRaw: string | undefined;
 let hasToggleKeyCache = false;
-
+let cachedAllowToolExpandInWatch = DEFAULT_ALLOW_TOOL_EXPAND_IN_WATCH;
+let hasAllowToolExpandInWatchCache = false;
+let cachedUnlockPolicy: UnlockPolicy = DEFAULT_UNLOCK_POLICY;
+let hasUnlockPolicyCache = false;
 function getBuiltin(name: string): any {
   try {
     return (globalThis as any).require?.(name) ?? (globalThis as any).process?.getBuiltinModule?.(name);
@@ -138,8 +168,15 @@ export function readConfigJson(): any {
 
     const os = getBuiltin("os");
     const home = os?.homedir?.() ?? (process as any).env?.HOME ?? "";
-    const userConfig = path.join(home, ".pi", "agent", "extensions", "pi-input-lock", "config.json");
-    if (fs.existsSync(userConfig)) return JSON.parse(fs.readFileSync(userConfig, "utf8"));
+    // (3) canonical user config; (4) legacy fallback. First existing file wins;
+    // configurations are never merged across files.
+    const userConfigs = [
+      home ? path.join(home, ".pi", "agent", "pi-input-lock.json") : "",
+      home ? path.join(home, ".pi", "agent", "extensions", "pi-input-lock", "config.json") : "",
+    ];
+    for (const candidate of userConfigs) {
+      if (candidate && fs.existsSync(candidate)) return JSON.parse(fs.readFileSync(candidate, "utf8"));
+    }
   } catch {
     // Configuration is optional. A malformed or unavailable file uses defaults.
   }
@@ -161,6 +198,31 @@ export function getToggleKeyRawCached(): string | undefined {
     hasToggleKeyCache = true;
   }
   return cachedToggleKeyRaw;
+}
+
+
+export function getAllowToolExpandInWatchCached(): boolean {
+  if (!hasAllowToolExpandInWatchCache) {
+    try {
+      cachedAllowToolExpandInWatch = readConfigJson()?.allowToolExpandInWatch === true;
+    } catch {
+      cachedAllowToolExpandInWatch = DEFAULT_ALLOW_TOOL_EXPAND_IN_WATCH;
+    }
+    hasAllowToolExpandInWatchCache = true;
+  }
+  return cachedAllowToolExpandInWatch;
+}
+
+export function getUnlockPolicyCached(): UnlockPolicy {
+  if (!hasUnlockPolicyCache) {
+    try {
+      cachedUnlockPolicy = readConfigJson()?.unlockPolicy === "manual" ? "manual" : DEFAULT_UNLOCK_POLICY;
+    } catch {
+      cachedUnlockPolicy = DEFAULT_UNLOCK_POLICY;
+    }
+    hasUnlockPolicyCache = true;
+  }
+  return cachedUnlockPolicy;
 }
 
 export function getToggleKeyId(): string {
@@ -187,9 +249,17 @@ export function getActiveToggleLabel(): string {
   }
 }
 
-export function resetToggleKeyCache(): void {
+export function resetInputLockConfigCache(): void {
   cachedToggleKeyRaw = undefined;
   hasToggleKeyCache = false;
+  cachedAllowToolExpandInWatch = DEFAULT_ALLOW_TOOL_EXPAND_IN_WATCH;
+  hasAllowToolExpandInWatchCache = false;
+  cachedUnlockPolicy = DEFAULT_UNLOCK_POLICY;
+  hasUnlockPolicyCache = false;
+}
+
+export function resetToggleKeyCache(): void {
+  resetInputLockConfigCache();
 }
 
 export function matchesToggleKey(data: string): boolean {
@@ -255,6 +325,25 @@ export function createInputLockRouter(
       if (io.isDuplicateNav?.(data, source)) return { consume: true };
     } catch {
       // Duplicate suppression is best effort; the lock itself remains strict.
+    }
+
+    let toolExpand = false;
+    if (!isKeyRelease(data) && !isKeyRepeat(data)) {
+      try {
+        toolExpand = io.matchesToolExpand?.(data) === true;
+      } catch {
+        // A failed action match keeps the locked surface strict.
+      }
+    }
+    if (toolExpand) {
+      if (source === "terminal") {
+        try {
+          io.expandTools?.();
+        } catch {
+          // Tool expansion is display-only and must not break input routing.
+        }
+      }
+      return { consume: true };
     }
 
     // Let native arrow handling reach the focused component in either protocol.
@@ -325,6 +414,7 @@ export default function (pi: ExtensionAPI) {
   let currentCtx: ExtensionContext | undefined;
   let savedInput = "";
   let latestTui: TUI | undefined;
+  let latestKeybindings: any;
   let listenerInstalled = false;
   let offTerminalInput: (() => void) | undefined;
   let offInputListener: (() => void) | undefined;
@@ -451,12 +541,51 @@ export default function (pi: ExtensionAPI) {
 
   const lockedEditorFactory = (ui: any) => (tui: TUI, theme: any, keybindings: any): LockedEditor => {
     latestTui = tui;
+    latestKeybindings = keybindings;
     const editor = new LockedEditor(tui, theme, keybindings, {
       accent: (text) => themeAccent(ui, text),
     });
     currentLockedEditor = editor;
     currentEditor = editor;
     return editor;
+  };
+
+
+  const matchesToolExpand = (data: string): boolean => {
+    try {
+      if (isKeyRelease(data) || isKeyRepeat(data)) return false;
+      if (!getAllowToolExpandInWatchCached()) return false;
+
+      const latestMatches = latestKeybindings?.matches;
+      if (typeof latestMatches === "function") {
+        const result = latestMatches.call(latestKeybindings, data, "app.tools.expand");
+        if (result !== undefined && result !== null) return result === true;
+      }
+
+      const editorKeybindings = (currentLockedEditor as any)?.keybindings;
+      const editorMatches = editorKeybindings?.matches;
+      return typeof editorMatches === "function"
+        ? editorMatches.call(editorKeybindings, data, "app.tools.expand") === true
+        : false;
+    } catch {
+      return false;
+    }
+  };
+
+  const expandTools = (): void => {
+    try {
+      const editor: any = currentLockedEditor;
+      const handler = editor?.actionHandlers?.get?.("app.tools.expand");
+      if (typeof handler === "function") {
+        handler();
+        return;
+      }
+
+      const ui: any = currentCtx?.ui;
+      if (typeof ui?.getToolsExpanded === "function" && typeof ui?.setToolsExpanded === "function") {
+        ui.setToolsExpanded(!ui.getToolsExpanded());
+      }
+    } catch {}
   };
 
   /** Borrow the editor only for WATCH and restore the exact captured surface. */
@@ -552,8 +681,16 @@ export default function (pi: ExtensionAPI) {
     return true;
   };
 
+
+  const resolveNextState = (state: LockState, event: LockEvent): LockState => {
+    const policy = getUnlockPolicyCached();
+    return policy !== "manual"
+      ? nextState(state, event)
+      : nextStateWithPolicy(state, event, policy, contextIsIdle(currentCtx) === false);
+  };
+
   const applyTransition = (event: LockEvent): boolean => {
-    const next = nextState(lockState, event);
+    const next = resolveNextState(lockState, event);
     if (next === lockState) {
       if (isLockedState(next) && !listenerInstalled && !installInputListener(getTui())) return false;
       setLockStatus(next);
@@ -612,6 +749,8 @@ export default function (pi: ExtensionAPI) {
     dialogOpen,
     getTui,
     isDuplicateNav,
+    matchesToolExpand,
+    expandTools,
     toggle: () => { toggle(); },
     requestRender: (tui) => {
       try {
@@ -661,7 +800,16 @@ export default function (pi: ExtensionAPI) {
       const tui = (ctx as any)?.ui?.tui ?? (ctx as any)?.tui;
       if (tui) latestTui = tui;
     } catch {}
-    if (contextIsIdle(ctx) === true && lockState !== "IDLE") forceIdle();
+    if (contextIsIdle(ctx) === true && lockState !== "IDLE") {
+      if (getUnlockPolicyCached() === "manual" && lockState === "WATCH") {
+        try {
+          installInputListener(getTui());
+        } catch {}
+        setLockStatus(lockState);
+      } else {
+        forceIdle();
+      }
+    }
   };
 
   const installTerminalListener = (ctx: ExtensionContext): void => {

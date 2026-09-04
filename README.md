@@ -28,12 +28,30 @@ Enable the extension explicitly:
 export PI_INPUT_LOCK=1
 ```
 
-The default toggle is `ctrl+alt+i`. Configure one shortcut in
-`.pi/agent/extensions/pi-input-lock/config.json`:
+The default toggle is `ctrl+alt+i`. Configure the extension in
+`~/.pi/agent/pi-input-lock.json`:
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `toggleKey` | string | `ctrl+alt+i` | Shortcut used to toggle the lock. |
+| `allowToolExpandInWatch` | boolean | `false` | Allow the configured `app.tools.expand` action during `WATCH`. |
+| `unlockPolicy` | `agent-settled` \| `manual` | `agent-settled` | Choose automatic or manual unlock after settlement. |
+
+A recommended combined configuration:
 
 ```json
-{ "toggleKey": "ctrl+alt+i" }
+{
+  "toggleKey": "ctrl+alt+i",
+  "allowToolExpandInWatch": true,
+  "unlockPolicy": "manual"
+}
 ```
+
+Configuration is cached for the lifetime of the process; restart Pi after changing it.
+
+`~/.pi/agent/extensions/pi-input-lock/config.json` is still accepted as a
+legacy fallback, but `~/.pi/agent/pi-input-lock.json` is the canonical user
+config and wins when both files exist (settings are never merged).
 
 The same action is available as `/input-lock` or `/lock`.
 
@@ -43,9 +61,12 @@ States are lifecycle-aware:
 - `WATCH`: input is locked and the status bar shows `🔒 WATCH`.
 - `OVERRIDE`: input is available after a manual toggle during an active run.
 
-Agent start enters `WATCH`; agent settled returns from either active state to
-`IDLE`. A manual toggle changes `WATCH` to `OVERRIDE` and back. If the runtime
-cannot confirm that an agent is active, it fails open to `IDLE`.
+With the default `agent-settled` policy, agent start enters `WATCH` and agent
+settlement returns from either active state to `IDLE`. With `manual`, settlement
+keeps `WATCH` until an inactive toggle restores the editor and draft. Manual mode
+is not forced on at startup (the extension still starts in `IDLE`), and session
+boundaries or reset events always return to `IDLE` rather than remaining sticky.
+If the runtime cannot confirm that an agent is active, it fails open to `IDLE`.
 
 ## Development
 

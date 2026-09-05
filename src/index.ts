@@ -409,7 +409,7 @@ export class LockedEditor extends CustomEditor {
 }
 
 export default function (pi: ExtensionAPI) {
-  if (!isEnabled()) return;
+  let runtimeEnabled = isEnabled();
   let lockState: LockState = "IDLE";
   let currentCtx: ExtensionContext | undefined;
   let savedInput = "";
@@ -758,8 +758,18 @@ export default function (pi: ExtensionAPI) {
       } catch {}
     },
   };
-  const inputRoute = createInputLockRouter(routerIO, "input");
-  const terminalRoute = createInputLockRouter(routerIO, "terminal");
+  const rawInputRoute = createInputLockRouter(routerIO, "input");
+  const rawTerminalRoute = createInputLockRouter(routerIO, "terminal");
+  const inputRoute = (data: string): RouteResult => runtimeEnabled ? rawInputRoute(data) : undefined;
+  const terminalRoute = (data: string): RouteResult => runtimeEnabled ? rawTerminalRoute(data) : undefined;
+
+  const disposeTerminalListener = (): void => {
+    const disposer = offTerminalInput;
+    offTerminalInput = undefined;
+    try {
+      disposer?.();
+    } catch {}
+  };
 
   const disposeInputListener = (): void => {
     const disposer = offInputListener;
@@ -771,6 +781,7 @@ export default function (pi: ExtensionAPI) {
   };
 
   const installInputListener = (tui: any): boolean => {
+    if (!runtimeEnabled) return false;
     if (listenerInstalled) return true;
     if (!tui || typeof tui.addInputListener !== "function") return false;
     try {
@@ -813,9 +824,8 @@ export default function (pi: ExtensionAPI) {
   };
 
   const installTerminalListener = (ctx: ExtensionContext): void => {
-    try {
-      offTerminalInput?.();
-    } catch {}
+    if (!runtimeEnabled) return;
+    disposeTerminalListener();
     try {
       offTerminalInput = (ctx.ui as any).onTerminalInput?.((data: string) => terminalRoute(data));
     } catch {
@@ -824,6 +834,10 @@ export default function (pi: ExtensionAPI) {
   };
 
   const handleAgentStart = async (_event: any, ctx: ExtensionContext): Promise<void> => {
+    if (!runtimeEnabled) {
+      currentCtx = ctx;
+      return;
+    }
     try {
       refreshCtx(ctx);
       if (contextIsIdle(ctx) !== false || !applyTransition("agent_start")) forceIdle();
@@ -833,6 +847,10 @@ export default function (pi: ExtensionAPI) {
   };
 
   const handleAgentSettled = async (_event: any, ctx: ExtensionContext): Promise<void> => {
+    if (!runtimeEnabled) {
+      currentCtx = ctx;
+      return;
+    }
     try {
       refreshCtx(ctx);
       if (!applyTransition("agent_settled")) forceIdle();
@@ -863,10 +881,7 @@ export default function (pi: ExtensionAPI) {
       } catch {}
     }
     disposeInputListener();
-    try {
-      offTerminalInput?.();
-    } catch {}
-    offTerminalInput = undefined;
+    disposeTerminalListener();
   };
 
   const handleSession = async (_event: any, ctx: ExtensionContext): Promise<void> => {
@@ -901,7 +916,8 @@ export default function (pi: ExtensionAPI) {
     } else {
       setLockStatus(lockState);
     }
-    installTerminalListener(ctx);
+    if (runtimeEnabled) installTerminalListener(ctx);
+    else disposeTerminalListener();
   };
 
   pi.on("session_start", handleSession as any);
@@ -917,11 +933,70 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_end" as any, async (_event: any, ctx: ExtensionContext) => refreshCtx(ctx));
   pi.on("agent_settled" as any, handleAgentSettled as any);
 
+  const enableRuntime = (ctx: ExtensionContext): void => {
+    currentCtx = ctx;
+    if (runtimeEnabled) {
+      ctx.ui.notify("Input lock is already enabled", "info");
+      return;
+    }
+    runtimeEnabled = true;
+    installTerminalListener(ctx);
+    try {
+      if (contextIsIdle(ctx) === false) {
+        refreshCtx(ctx);
+        if (contextIsIdle(ctx) !== false || !applyTransition("agent_start")) forceIdle();
+      }
+    } catch {
+      try {
+        forceIdle();
+      } catch {}
+    }
+    ctx.ui.notify("Input lock enabled", "info");
+  };
+
+  const disableRuntime = (ctx: ExtensionContext): void => {
+    currentCtx = ctx;
+    if (!runtimeEnabled) {
+      ctx.ui.notify("Input lock is already disabled", "info");
+      return;
+    }
+    if (dialogOpen()) {
+      ctx.ui.notify("Input lock disable is unavailable while another UI has focus", "info");
+      return;
+    }
+    try {
+      forceIdle();
+    } catch {
+      lockState = "IDLE";
+      setLockStatus("IDLE");
+    }
+    try {
+      applyLockUI(false);
+    } catch {}
+    disposeInputListener();
+    disposeTerminalListener();
+    runtimeEnabled = false;
+    ctx.ui.notify("Input lock disabled", "info");
+  };
+
   const cmdHandler = async (args: string, ctx: ExtensionContext): Promise<void> => {
-    if (typeof args === "string" && args.trim().toLowerCase() === "status") {
+    const command = typeof args === "string" ? args.trim().toLowerCase() : "";
+    if (command === "status") {
       const agentIdle = contextIsIdle(ctx);
       const agentWord = agentIdle === false ? "active" : agentIdle === true ? "inactive" : "unknown";
-      ctx.ui.notify(`State: ${lockState} · Agent: ${agentWord} · Unlock policy: ${getUnlockPolicyCached()} · Tool expand: ${getAllowToolExpandInWatchCached() ? "enabled" : "disabled"} · Toggle: ${getActiveToggleLabel()}`, "info");
+      ctx.ui.notify(`Enabled: ${runtimeEnabled ? "yes" : "no"} · State: ${lockState} · Agent: ${agentWord} · Unlock policy: ${getUnlockPolicyCached()} · Tool expand: ${getAllowToolExpandInWatchCached() ? "enabled" : "disabled"} · Toggle: ${getActiveToggleLabel()}`, "info");
+      return;
+    }
+    if (command === "enable") {
+      enableRuntime(ctx);
+      return;
+    }
+    if (command === "disable") {
+      disableRuntime(ctx);
+      return;
+    }
+    if (!runtimeEnabled) {
+      ctx.ui.notify("Input lock is disabled. Use /input-lock enable.", "info");
       return;
     }
     if (lockState === "IDLE") {
@@ -937,11 +1012,11 @@ export default function (pi: ExtensionAPI) {
   };
 
   pi.registerCommand("input-lock", {
-    description: "Toggle the Pi input safety lock",
+    description: "Manage the Pi input safety lock",
     handler: cmdHandler,
   });
   pi.registerCommand("lock", {
-    description: "Toggle the Pi input safety lock",
+    description: "Manage the Pi input safety lock",
     handler: cmdHandler,
   });
 

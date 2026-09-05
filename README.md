@@ -1,7 +1,7 @@
 # @j1nn0/pi-input-lock
 
 A small Pi extension that protects interactive input while an agent is running.
-It is opt-in: the parent process is unchanged unless `PI_INPUT_LOCK=1` is set.
+It is always loaded. Set `PI_INPUT_LOCK=1` to start with the lock enabled; without it, the runtime lock starts disabled.
 
 In `WATCH`, text input, submit, paste, and normal Pi shortcuts are blocked: typed
 text is not inserted, submit does nothing, and shortcuts do not run. Arrow-key
@@ -24,11 +24,20 @@ PI_INPUT_LOCK=1 pi -ne -e . --tui-mode fullscreen
 
 ## Usage
 
-Enable the extension explicitly:
+Choose the startup state (optional):
 
 ```bash
 export PI_INPUT_LOCK=1
 ```
+
+The extension also loads when `PI_INPUT_LOCK` is unset. Runtime controls are:
+
+- `/input-lock enable` enables the lock for the current Pi process.
+- `/input-lock disable` disables the lock for the current Pi process.
+- `/input-lock status` reports the current enabled state and lock details without changing them.
+- `/lock enable`, `/lock disable`, and `/lock status` are aliases.
+
+Runtime changes last only for the current Pi process. After a restart, the startup state is derived from `PI_INPUT_LOCK` again.
 
 The default toggle is `ctrl+alt+i`. Configure the extension in
 `~/.pi/agent/pi-input-lock.json`:

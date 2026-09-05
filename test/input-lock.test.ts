@@ -28,7 +28,7 @@ type Harness = ReturnType<typeof makeHarness>;
 
 function makeHarness(initialFactory?: EditorFactory, initialComponent?: any, initialText = "draft prompt") {
   const handlers = new Map<string, Function>();
-  const commands: Array<{ handler: Function }> = [];
+  const commands: Array<{ name: string; description?: string; handler: Function }> = [];
   const defaultEditor = { name: "pi-default-editor", getText: () => "" };
   let component = initialComponent ?? defaultEditor;
   let componentFactory = initialFactory;
@@ -103,8 +103,8 @@ function makeHarness(initialFactory?: EditorFactory, initialComponent?: any, ini
     isIdle: () => idle,
   };
   const pi: any = {
-    on: (name: string, handler: Function) => handlers.set(name, handler),
-    registerCommand: (_name: string, options: { handler: Function }) => commands.push(options),
+    on: vi.fn((name: string, handler: Function) => handlers.set(name, handler)),
+    registerCommand: vi.fn((name: string, options: { description?: string; handler: Function }) => commands.push({ name, ...options })),
   };
 
   return {
@@ -120,6 +120,9 @@ function makeHarness(initialFactory?: EditorFactory, initialComponent?: any, ini
     inputDisposers,
     terminalDisposers,
     activeInputHandlers,
+    get terminalListenerInstalled() {
+      return terminalRoute !== undefined;
+    },
     get component() {
       return component;
     },
@@ -166,6 +169,17 @@ function makeHarness(initialFactory?: EditorFactory, initialComponent?: any, ini
 async function withEnabled<T>(run: () => Promise<T> | T): Promise<T> {
   const previous = process.env.PI_INPUT_LOCK;
   process.env.PI_INPUT_LOCK = "1";
+  try {
+    return await run();
+  } finally {
+    if (previous === undefined) delete process.env.PI_INPUT_LOCK;
+    else process.env.PI_INPUT_LOCK = previous;
+  }
+}
+
+async function withDisabled<T>(run: () => Promise<T> | T): Promise<T> {
+  const previous = process.env.PI_INPUT_LOCK;
+  delete process.env.PI_INPUT_LOCK;
   try {
     return await run();
   } finally {
@@ -1007,18 +1021,315 @@ describe("runtime activation", () => {
     }
   });
 
-  it("does not register runtime hooks when disabled", () => {
-    const pi: any = { on: vi.fn(), registerCommand: vi.fn() };
-    const previous = process.env.PI_INPUT_LOCK;
-    try {
-      delete process.env.PI_INPUT_LOCK;
-      extension(pi);
-    } finally {
-      if (previous === undefined) delete process.env.PI_INPUT_LOCK;
-      else process.env.PI_INPUT_LOCK = previous;
-    }
-    expect(pi.on).not.toHaveBeenCalled();
-    expect(pi.registerCommand).not.toHaveBeenCalled();
+  it("registers runtime hooks and commands when startup-disabled", async () => {
+    await withDisabled(async () => {
+      const harness = makeHarness();
+      const initialComponent = harness.component;
+      const initialFactory = harness.componentFactory;
+      const initialText = harness.editorText;
+
+      await startExtension(harness);
+
+      expect(harness.pi.on).toHaveBeenCalledTimes(12);
+      expect(harness.pi.registerCommand).toHaveBeenCalledTimes(2);
+      expect(harness.commands.map(({ name, description }) => ({ name, description }))).toEqual([
+        { name: "input-lock", description: "Manage the Pi input safety lock" },
+        { name: "lock", description: "Manage the Pi input safety lock" },
+      ]);
+      expect(harness.commands[1]!.handler).toBe(harness.commands[0]!.handler);
+      expect(harness.terminalListenerInstalled).toBe(false);
+
+      harness.idle = false;
+      await agentStart(harness);
+      await agentSettled(harness);
+
+      expect(harness.component).toBe(initialComponent);
+      expect(harness.componentFactory).toBe(initialFactory);
+      expect(harness.editorText).toBe(initialText);
+      expect(harness.activeInputHandlers.size).toBe(0);
+      expect(harness.terminalListenerInstalled).toBe(false);
+    });
+  });
+
+  it("preserves startup-enabled lifecycle behavior", async () => {
+    await withEnabled(async () => {
+      const factory: EditorFactory = () => ({ name: "editor", getText: () => "" });
+      const harness = makeHarness(factory, { name: "editor", getText: () => "" });
+
+      await startExtension(harness);
+      expect(harness.terminalListenerInstalled).toBe(true);
+
+      harness.idle = false;
+      await agentStart(harness);
+
+      expect(harness.component).toBeInstanceOf(LockedEditor);
+      expect(harness.activeInputHandlers.size).toBe(1);
+    });
+  });
+
+  it("enables while inactive without borrowing the editor", async () => {
+    await withDisabled(async () => {
+      const factory: EditorFactory = () => ({ name: "editor", getText: () => "" });
+      const editor = { name: "editor", getText: () => "" };
+      const harness = makeHarness(factory, editor, "inactive draft");
+
+      await startExtension(harness);
+      await harness.commands[0]!.handler(" ENABLE ", harness.ctx);
+
+      expect(harness.ui.notify).toHaveBeenLastCalledWith("Input lock enabled", "info");
+      expect(harness.terminalListenerInstalled).toBe(true);
+      expect(harness.activeInputHandlers.size).toBe(0);
+      expect(harness.component).toBe(editor);
+      expect(harness.componentFactory).toBe(factory);
+      expect(harness.editorText).toBe("inactive draft");
+      expect(harness.setEditorComponent).not.toHaveBeenCalled();
+
+      await harness.commands[0]!.handler("ENABLE", harness.ctx);
+      expect(harness.ui.notify).toHaveBeenLastCalledWith("Input lock is already enabled", "info");
+      expect(harness.terminalDisposers).toHaveLength(1);
+      expect(harness.setEditorComponent).not.toHaveBeenCalled();
+    });
+  });
+
+  it("enables while active and immediately enters WATCH", async () => {
+    await withDisabled(async () => {
+      const factory: EditorFactory = () => ({ name: "editor", getText: () => "" });
+      const harness = makeHarness(factory, { name: "editor", getText: () => "" }, "active draft");
+      harness.idle = false;
+
+      await startExtension(harness);
+      await harness.commands[0]!.handler("enable", harness.ctx);
+
+      expect(harness.ui.notify).toHaveBeenLastCalledWith("Input lock enabled", "info");
+      expect(harness.terminalListenerInstalled).toBe(true);
+      expect(harness.component).toBeInstanceOf(LockedEditor);
+      expect(harness.editorText).toBe("");
+      expect(harness.activeInputHandlers.size).toBe(1);
+    });
+  });
+
+  it("enables without guessing when activity is unknown", async () => {
+    await withDisabled(async () => {
+      const factory: EditorFactory = () => ({ name: "editor", getText: () => "" });
+      const editor = { name: "editor", getText: () => "" };
+      const harness = makeHarness(factory, editor, "unknown draft");
+      const unknownContext = { ...harness.ctx, isIdle: undefined };
+
+      await startExtension(harness);
+      await harness.commands[0]!.handler("enable", unknownContext);
+
+      expect(harness.ui.notify).toHaveBeenLastCalledWith("Input lock enabled", "info");
+      expect(harness.terminalListenerInstalled).toBe(true);
+      expect(harness.component).toBe(editor);
+      expect(harness.componentFactory).toBe(factory);
+      expect(harness.editorText).toBe("unknown draft");
+      expect(harness.activeInputHandlers.size).toBe(0);
+
+      harness.idle = false;
+      await agentStart(harness);
+      expect(harness.component).toBeInstanceOf(LockedEditor);
+      expect(harness.activeInputHandlers.size).toBe(1);
+    });
+  });
+
+  it("disables WATCH with exact editor and draft restoration", async () => {
+    await withEnabled(async () => {
+      const factory: EditorFactory = () => ({ name: "editor", getText: () => "" });
+      const harness = makeHarness(factory, { name: "editor", getText: () => "" }, "watch draft");
+
+      await startExtension(harness);
+      harness.idle = false;
+      await agentStart(harness);
+      expect(harness.component).toBeInstanceOf(LockedEditor);
+
+      await harness.commands[0]!.handler(" disable ", harness.ctx);
+
+      expect(harness.ui.notify).toHaveBeenLastCalledWith("Input lock disabled", "info");
+      expect(harness.componentFactory).toBe(factory);
+      expect(harness.editorText).toBe("watch draft");
+      expect(harness.component).not.toBeInstanceOf(LockedEditor);
+      expect(harness.activeInputHandlers.size).toBe(0);
+      expect(harness.terminalListenerInstalled).toBe(false);
+      expect(harness.inputDisposers[0]).toHaveBeenCalledTimes(1);
+      expect(harness.terminalDisposers[0]).toHaveBeenCalledTimes(1);
+      expect(harness.ui.setStatus).toHaveBeenLastCalledWith("pi-input-lock", undefined);
+    });
+  });
+
+  it("disables OVERRIDE and IDLE without leaving stale ownership", async () => {
+    await withEnabled(async () => {
+      const factory: EditorFactory = () => ({ name: "editor", getText: () => "" });
+      const overrideHarness = makeHarness(factory, { name: "editor", getText: () => "" }, "override draft");
+
+      await startExtension(overrideHarness);
+      overrideHarness.idle = false;
+      await agentStart(overrideHarness);
+      overrideHarness.terminal("\x1b\x09");
+      expect(overrideHarness.activeInputHandlers.size).toBe(0);
+      expect(overrideHarness.componentFactory).toBe(factory);
+      expect(overrideHarness.editorText).toBe("override draft");
+
+      await overrideHarness.commands[0]!.handler("disable", overrideHarness.ctx);
+      expect(overrideHarness.terminalListenerInstalled).toBe(false);
+      expect(overrideHarness.activeInputHandlers.size).toBe(0);
+      expect(overrideHarness.componentFactory).toBe(factory);
+      expect(overrideHarness.editorText).toBe("override draft");
+
+      const idleHarness = makeHarness(factory, { name: "editor", getText: () => "" }, "idle draft");
+      await startExtension(idleHarness);
+      const initialComponent = idleHarness.component;
+      const initialFactory = idleHarness.componentFactory;
+      const initialText = idleHarness.editorText;
+      const setEditorCalls = idleHarness.setEditorComponent.mock.calls.length;
+
+      await idleHarness.commands[0]!.handler("disable", idleHarness.ctx);
+
+      expect(idleHarness.ui.notify).toHaveBeenLastCalledWith("Input lock disabled", "info");
+      expect(idleHarness.component).toBe(initialComponent);
+      expect(idleHarness.componentFactory).toBe(initialFactory);
+      expect(idleHarness.editorText).toBe(initialText);
+      expect(idleHarness.setEditorComponent.mock.calls.length).toBe(setEditorCalls);
+      expect(idleHarness.terminalListenerInstalled).toBe(false);
+    });
+  });
+
+  it("is idempotent across disable and re-enable cycles", async () => {
+    await withDisabled(async () => {
+      const factory: EditorFactory = () => ({ name: "editor", getText: () => "" });
+      const harness = makeHarness(factory, { name: "editor", getText: () => "" });
+
+      await startExtension(harness);
+      await harness.commands[0]!.handler("enable", harness.ctx);
+      await harness.commands[0]!.handler("disable", harness.ctx);
+      expect(harness.terminalDisposers).toHaveLength(1);
+      expect(harness.terminalDisposers[0]).toHaveBeenCalledTimes(1);
+
+      await harness.commands[0]!.handler("disable", harness.ctx);
+      expect(harness.terminalDisposers[0]).toHaveBeenCalledTimes(1);
+
+      await harness.commands[0]!.handler("enable", harness.ctx);
+      await harness.commands[0]!.handler("enable", harness.ctx);
+      expect(harness.terminalDisposers).toHaveLength(2);
+      expect(harness.terminalListenerInstalled).toBe(true);
+
+      harness.idle = false;
+      await agentStart(harness);
+      expect(harness.tui.addInputListener).toHaveBeenCalledTimes(1);
+      await harness.commands[0]!.handler("disable", harness.ctx);
+      expect(harness.inputDisposers[0]).toHaveBeenCalledTimes(1);
+      expect(harness.terminalDisposers[1]).toHaveBeenCalledTimes(1);
+
+      harness.idle = true;
+      await harness.commands[0]!.handler("enable", harness.ctx);
+      expect(harness.terminalDisposers).toHaveLength(3);
+      expect(harness.activeInputHandlers.size).toBe(0);
+      expect(harness.tui.addInputListener).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("keeps disabled lifecycle, commands, and shortcuts inert", async () => {
+    await withDisabled(async () => {
+      const factory: EditorFactory = () => ({ name: "editor", getText: () => "" });
+      const harness = makeHarness(factory, { name: "editor", getText: () => "" }, "disabled draft");
+
+      await startExtension(harness);
+      const initialComponent = harness.component;
+      const initialFactory = harness.componentFactory;
+      const initialText = harness.editorText;
+      harness.idle = false;
+      await agentStart(harness);
+      await agentSettled(harness);
+
+      expect(harness.component).toBe(initialComponent);
+      expect(harness.componentFactory).toBe(initialFactory);
+      expect(harness.editorText).toBe(initialText);
+      expect(harness.activeInputHandlers.size).toBe(0);
+      expect(harness.terminalListenerInstalled).toBe(false);
+      expect(harness.terminal("\x1b\x09")).toBeUndefined();
+      expect(harness.input("blocked text\r")).toEqual([]);
+
+      await harness.commands[0]!.handler("", harness.ctx);
+      await harness.commands[0]!.handler("bogus", harness.ctx);
+      expect(harness.ui.notify).toHaveBeenLastCalledWith("Input lock is disabled. Use /input-lock enable.", "info");
+    });
+  });
+
+  it("uses the runtime commands with the manual unlock policy", async () => {
+    await withHomeConfig({ unlockPolicy: "manual" }, async () => {
+      await withDisabled(async () => {
+        const factory: EditorFactory = () => ({ name: "editor", getText: () => "" });
+        const harness = makeHarness(factory, { name: "editor", getText: () => "" }, "manual runtime draft");
+        harness.idle = false;
+
+        await startExtension(harness);
+        await harness.commands[1]!.handler("enable", harness.ctx);
+        expect(harness.component).toBeInstanceOf(LockedEditor);
+        expect(harness.activeInputHandlers.size).toBe(1);
+
+        harness.idle = true;
+        await agentSettled(harness);
+        expect(harness.component).toBeInstanceOf(LockedEditor);
+        expect(harness.activeInputHandlers.size).toBe(1);
+
+        await harness.commands[0]!.handler("disable", harness.ctx);
+        expect(harness.componentFactory).toBe(factory);
+        expect(harness.editorText).toBe("manual runtime draft");
+        expect(harness.component).not.toBeInstanceOf(LockedEditor);
+        expect(harness.activeInputHandlers.size).toBe(0);
+        expect(harness.terminalListenerInstalled).toBe(false);
+      });
+    });
+  });
+
+
+  it("keeps runtime enabled while a foreign UI owns focus", async () => {
+    await withEnabled(async () => {
+      const factory: EditorFactory = () => ({ name: "editor", getText: () => "" });
+      const harness = makeHarness(factory, { name: "editor", getText: () => "" }, "foreign draft");
+
+      await startExtension(harness);
+      harness.idle = false;
+      await agentStart(harness);
+      const locked = harness.component;
+      harness.focus({ name: "ask-user" });
+
+      await harness.commands[0]!.handler("disable", harness.ctx);
+
+      expect(harness.ui.notify).toHaveBeenLastCalledWith(
+        "Input lock disable is unavailable while another UI has focus",
+        "info",
+      );
+      expect(harness.component).toBe(locked);
+      expect(harness.activeInputHandlers.size).toBe(1);
+      expect(harness.terminalListenerInstalled).toBe(true);
+
+      harness.clearFocus();
+      await harness.commands[0]!.handler("disable", harness.ctx);
+      expect(harness.componentFactory).toBe(factory);
+      expect(harness.editorText).toBe("foreign draft");
+      expect(harness.activeInputHandlers.size).toBe(0);
+      expect(harness.terminalListenerInstalled).toBe(false);
+    });
+  });
+
+  it("keeps runtime state across session starts", async () => {
+    await withDisabled(async () => {
+      const factory: EditorFactory = () => ({ name: "editor", getText: () => "" });
+      const harness = makeHarness(factory, { name: "editor", getText: () => "" });
+
+      await startExtension(harness);
+      await harness.commands[0]!.handler("enable", harness.ctx);
+      await harness.handlers.get("session_start")?.({}, harness.ctx);
+      expect(harness.terminalListenerInstalled).toBe(true);
+
+      await harness.commands[0]!.handler("disable", harness.ctx);
+      await harness.handlers.get("session_start")?.({}, harness.ctx);
+      expect(harness.terminalListenerInstalled).toBe(false);
+      harness.idle = false;
+      await agentStart(harness);
+      expect(harness.component).not.toBeInstanceOf(LockedEditor);
+      expect(harness.activeInputHandlers.size).toBe(0);
+    });
   });
 });
 
@@ -1037,6 +1348,7 @@ describe("command status", () => {
 
         expect(harness.ui.notify).toHaveBeenCalledTimes(1);
         expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("State: IDLE"), "info");
+        expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Enabled: yes"), "info");
         expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Agent: inactive"), "info");
         expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Unlock policy: agent-settled"), "info");
         expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Tool expand: disabled"), "info");
@@ -1046,6 +1358,28 @@ describe("command status", () => {
         expect(harness.editorText).toBe(editorText);
         expect(harness.activeInputHandlers.size).toBe(0);
       });
+    });
+  });
+
+  it("reports disabled status without changing the lock surface", async () => {
+    await withDisabled(async () => {
+      const factory: EditorFactory = () => ({ name: "editor", getText: () => "" });
+      const harness = makeHarness(factory, { name: "editor", getText: () => "" }, "disabled status draft");
+      await startExtension(harness);
+      const component = harness.component;
+      const componentFactory = harness.componentFactory;
+      const editorText = harness.editorText;
+
+      await harness.commands[0]!.handler(" status ", harness.ctx);
+
+      expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Enabled: no"), "info");
+      expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("State: IDLE"), "info");
+      expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Agent: inactive"), "info");
+      expect(harness.component).toBe(component);
+      expect(harness.componentFactory).toBe(componentFactory);
+      expect(harness.editorText).toBe(editorText);
+      expect(harness.activeInputHandlers.size).toBe(0);
+      expect(harness.terminalListenerInstalled).toBe(false);
     });
   });
 
@@ -1064,6 +1398,7 @@ describe("command status", () => {
       await harness.commands[0]!.handler("status", harness.ctx);
 
       expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("State: WATCH"), "info");
+      expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Enabled: yes"), "info");
       expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Agent: active"), "info");
       expect(harness.component).toBe(component);
       expect(harness.componentFactory).toBe(componentFactory);

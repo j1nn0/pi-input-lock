@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.8] - 2026-09-05
+
+- Add runtime enable/disable via `/input-lock enable` and `/input-lock disable` (with `/lock` aliases).
+- Treat `PI_INPUT_LOCK=1` as startup auto-enable rather than a load requirement; `/input-lock status` reports whether runtime locking is enabled.
+
 ## [0.1.7] - 2026-09-04
 
 - Add JSON Schema support for pi-input-lock configuration.

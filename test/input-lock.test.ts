@@ -36,6 +36,7 @@ function makeHarness(initialFactory?: EditorFactory, initialComponent?: any, ini
   let idle = true;
   let focused: any;
   let failFactory: EditorFactory | undefined;
+  let failUndefinedRestore = false;
   let terminalRoute: ((data: string) => unknown) | undefined;
   const activeInputHandlers = new Set<Function>();
   const inputDisposers: Array<ReturnType<typeof vi.fn>> = [];
@@ -66,6 +67,7 @@ function makeHarness(initialFactory?: EditorFactory, initialComponent?: any, ini
   };
 
   const setEditorComponent = vi.fn((factory: EditorFactory | undefined) => {
+    if (factory === undefined && failUndefinedRestore) throw new Error("undefined restore failed");
     if (factory !== undefined && factory === failFactory) throw new Error("factory restore failed");
     componentFactory = factory;
     if (factory === undefined) {
@@ -143,6 +145,9 @@ function makeHarness(initialFactory?: EditorFactory, initialComponent?: any, ini
     },
     set failFactory(value: EditorFactory | undefined) {
       failFactory = value;
+    },
+    set failUndefinedRestore(value: boolean) {
+      failUndefinedRestore = value;
     },
     focus(value: any) {
       focused = value;
@@ -1153,6 +1158,54 @@ describe("runtime activation", () => {
       expect(harness.inputDisposers[0]).toHaveBeenCalledTimes(1);
       expect(harness.terminalDisposers[0]).toHaveBeenCalledTimes(1);
       expect(harness.ui.setStatus).toHaveBeenLastCalledWith("pi-input-lock", undefined);
+    });
+  });
+
+  it("keeps runtime enabled when editor restoration fails during disable", async () => {
+    await withEnabled(async () => {
+      const factory: EditorFactory = () => ({ name: "editor", getText: () => "" });
+      const harness = makeHarness(factory, { name: "editor", getText: () => "" }, "transactional draft");
+
+      await startExtension(harness);
+      harness.idle = false;
+      await agentStart(harness);
+      expect(harness.component).toBeInstanceOf(LockedEditor);
+      expect(harness.activeInputHandlers.size).toBe(1);
+      expect(harness.terminalListenerInstalled).toBe(true);
+
+      harness.failFactory = factory;
+      harness.failUndefinedRestore = true;
+      await harness.commands[0]!.handler("disable", harness.ctx);
+      harness.failFactory = undefined;
+      harness.failUndefinedRestore = false;
+
+      expect(harness.ui.notify).toHaveBeenCalledWith(
+        "Input lock disable failed: editor restore failed; lock remains active",
+        "error",
+      );
+      expect(harness.ui.notify).not.toHaveBeenCalledWith("Input lock disabled", "info");
+      await harness.commands[0]!.handler("status", harness.ctx);
+      expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Enabled: yes"), "info");
+      expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("State: WATCH"), "info");
+      expect(harness.component).toBeInstanceOf(LockedEditor);
+      expect(harness.input("blocked text\r")).toEqual([{ consume: true }]);
+      expect(harness.activeInputHandlers.size).toBe(1);
+      expect(harness.terminalListenerInstalled).toBe(true);
+
+      await harness.commands[0]!.handler("disable", harness.ctx);
+
+      expect(harness.ui.notify).toHaveBeenCalledWith("Input lock disabled", "info");
+      expect(harness.componentFactory).toBe(factory);
+      expect(harness.editorText).toBe("transactional draft");
+      expect(harness.component).not.toBeInstanceOf(LockedEditor);
+      expect(harness.activeInputHandlers.size).toBe(0);
+      expect(harness.terminalListenerInstalled).toBe(false);
+      expect(harness.inputDisposers[0]).toHaveBeenCalledTimes(1);
+      expect(harness.terminalDisposers[0]).toHaveBeenCalledTimes(1);
+
+      await harness.commands[0]!.handler("status", harness.ctx);
+      expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Enabled: no"), "info");
+      expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("State: IDLE"), "info");
     });
   });
 

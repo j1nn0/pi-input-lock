@@ -964,17 +964,23 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify("Input lock disable is unavailable while another UI has focus", "info");
       return;
     }
-    try {
-      forceIdle();
-    } catch {
-      lockState = "IDLE";
-      setLockStatus("IDLE");
+    const needsRestore = isLockedState(lockState) || currentLockedEditor !== undefined || hasSavedEditorFactory;
+    if (needsRestore) {
+      try {
+        if (!applyLockUI(false)) {
+          dialogOpen();
+          ctx.ui.notify("Input lock disable failed: editor restore failed; lock remains active", "error");
+          return;
+        }
+      } catch {
+        ctx.ui.notify("Input lock disable failed: editor restore failed; lock remains active", "error");
+        return;
+      }
     }
-    try {
-      applyLockUI(false);
-    } catch {}
     disposeInputListener();
     disposeTerminalListener();
+    lockState = "IDLE";
+    setLockStatus("IDLE");
     runtimeEnabled = false;
     ctx.ui.notify("Input lock disabled", "info");
   };

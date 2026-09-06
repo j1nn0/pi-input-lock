@@ -1020,20 +1020,9 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.notify(lockState === "WATCH" ? `Input locked (${label})` : "Input unlocked", "info");
   };
 
-  const DEPRECATED_LOCK_NOTICE = "/lock is deprecated and will be removed in v0.2.0. Use /input-lock instead.";
-
-  const deprecatedLockCommandHandler = async (args: string, ctx: ExtensionContext): Promise<void> => {
-    ctx.ui.notify(DEPRECATED_LOCK_NOTICE, "info");
-    await inputLockCommandHandler(args, ctx);
-  };
-
   pi.registerCommand("input-lock", {
     description: "Manage the Pi input safety lock",
     handler: inputLockCommandHandler,
-  });
-  pi.registerCommand("lock", {
-    description: "Deprecated alias of /input-lock (removed in v0.2.0)",
-    handler: deprecatedLockCommandHandler,
   });
 
 }

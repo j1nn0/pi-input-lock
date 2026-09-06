@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.2.0] - 2026-09-06
+
+- Remove the deprecated `/lock` compatibility alias; use `/input-lock` instead.
+
 ## [0.1.10] - 2026-09-06
 
 - Prevent WATCH rendering from exceeding narrow terminal widths and crashing Pi TUI.

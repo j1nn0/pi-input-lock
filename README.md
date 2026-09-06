@@ -35,7 +35,6 @@ The extension also loads when `PI_INPUT_LOCK` is unset. Runtime controls are:
 - `/input-lock enable` enables the lock for the current Pi process.
 - `/input-lock disable` disables the lock for the current Pi process.
 - `/input-lock status` reports the current enabled state and lock details without changing them.
-- `/lock` is a deprecated compatibility alias for `/input-lock`. It will be removed in v0.2.0.
 
 Runtime changes last only for the current Pi process. After a restart, the startup state is derived from `PI_INPUT_LOCK` again.
 

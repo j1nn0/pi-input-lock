@@ -32,7 +32,6 @@ export PI_INPUT_LOCK=1
 - `/input-lock enable`: ロックを有効にする。
 - `/input-lock disable`: ロックを無効にする。
 - `/input-lock status`: 有効/無効状態とロックの情報を確認する（状態は変更しない）。
-- `/lock` は `/input-lock` の非推奨互換エイリアスです。v0.2.0 で削除します。
 
 実行中の切り替えは現在の Pi プロセスにだけ有効です。再起動すると、`PI_INPUT_LOCK` から起動時の状態を改めて決定します。
 

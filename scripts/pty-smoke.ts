@@ -43,6 +43,40 @@ const TIMEOUTS = {
   quit: 10_000,
 };
 
+const PROCESS_TIMEOUT_GRACE_MS = 500;
+const PROCESS_KILL_GRACE_MS = 500;
+const PROCESS_OUTPUT_TAIL_BYTES = 2_000;
+
+const INHERITED_ENV_KEYS = [
+  "PATH",
+  "HOME",
+  "TMPDIR",
+  "TERM",
+  "LANG",
+  "LANGUAGE",
+  "LC_ALL",
+  "LC_CTYPE",
+  "LC_COLLATE",
+  "LC_MESSAGES",
+  "LC_MONETARY",
+  "LC_NUMERIC",
+  "LC_TIME",
+] as const;
+
+const PTY_ENV_KEYS = [
+  ...INHERITED_ENV_KEYS,
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_CACHE_HOME",
+  "XDG_STATE_HOME",
+  "PI_CODING_AGENT_DIR",
+  "PI_CODING_AGENT_SESSION_DIR",
+  "PI_OFFLINE",
+  "PI_SKIP_VERSION_CHECK",
+  "PI_TELEMETRY",
+  "PI_TRUE_COLOR",
+] as const;
+
 const EXPECTED_PACK_FILES = [
   "CHANGELOG.md",
   "LICENSE",
@@ -125,17 +159,10 @@ function shellQuote(value: string): string {
 }
 
 function cleanInheritedEnvironment(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  for (const key of [
-    "PI_CODING_AGENT_DIR",
-    "PI_CODING_AGENT_SESSION_DIR",
-    "PI_INPUT_LOCK",
-    "PI_OFFLINE",
-    "PI_SKIP_VERSION_CHECK",
-    "PI_TELEMETRY",
-    "PI_TRUE_COLOR",
-  ]) {
-    delete env[key];
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of INHERITED_ENV_KEYS) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
   }
   return env;
 }
@@ -147,14 +174,57 @@ function runProcess(command: string, args: string[], options: ProcessOptions): P
       env: options.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    const commandLine = [command, ...args].map(shellQuote).join(" ");
     let stdout = "";
     let stderr = "";
     let settled = false;
-    const timeout = options.timeoutMs
-      ? setTimeout(() => {
-          child.kill("SIGTERM");
-        }, options.timeoutMs)
-      : undefined;
+    let timedOut = false;
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const tail = (value: string): string => {
+      if (value.length === 0) return "<empty>";
+      return value.length > PROCESS_OUTPUT_TAIL_BYTES ? `...${value.slice(-PROCESS_OUTPUT_TAIL_BYTES)}` : value;
+    };
+    const timeoutError = (code: number | null, signal: NodeJS.Signals | null): Error =>
+      new Error(
+        [
+          `process timed out: command=${commandLine} timeout=${String(options.timeoutMs)}ms`,
+          `exit code=${String(code)} signal=${String(signal)}`,
+          `stdout tail: ${tail(stdout)}`,
+          `stderr tail: ${tail(stderr)}`,
+        ].join("\n"),
+      );
+    const clearTimers = (): void => {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (killTimer) clearTimeout(killTimer);
+      if (fallbackTimer) clearTimeout(fallbackTimer);
+    };
+    const settle = (code: number | null, signal: NodeJS.Signals | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimers();
+      if (timedOut) {
+        reject(timeoutError(code, signal));
+      } else {
+        resolvePromise({ code, signal, stdout, stderr });
+      }
+    };
+    const forceKill = (): void => {
+      if (settled) return;
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // The child may have exited between the timeout stages.
+      }
+      fallbackTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        clearTimers();
+        reject(timeoutError(child.exitCode, child.signalCode ?? "SIGKILL"));
+      }, PROCESS_KILL_GRACE_MS);
+    };
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
@@ -165,19 +235,29 @@ function runProcess(command: string, args: string[], options: ProcessOptions): P
       stderr += chunk;
     });
     child.once("error", (error) => {
-      if (timeout) clearTimeout(timeout);
-      if (!settled) {
+      if (settled) return;
+      if (timedOut) {
+        settle(child.exitCode, child.signalCode);
+      } else {
         settled = true;
+        clearTimers();
         reject(error);
       }
     });
-    child.once("close", (code, signal) => {
-      if (timeout) clearTimeout(timeout);
-      if (!settled) {
-        settled = true;
-        resolvePromise({ code, signal, stdout, stderr });
-      }
-    });
+    child.once("close", (code, signal) => settle(code, signal));
+
+    if (options.timeoutMs !== undefined && !settled) {
+      timeoutTimer = setTimeout(() => {
+        if (settled) return;
+        timedOut = true;
+        try {
+          child.kill("SIGTERM");
+        } catch {
+          // The child may have exited before the timeout signal.
+        }
+        killTimer = setTimeout(forceKill, PROCESS_TIMEOUT_GRACE_MS);
+      }, options.timeoutMs);
+    }
   });
 }
 
@@ -562,7 +642,7 @@ async function findFiles(root: string, prefix = ""): Promise<string[]> {
   return files;
 }
 
-async function makeSmokeEnvironment(root: string, serverPort: number): Promise<{
+async function makeSmokeEnvironment(root: string): Promise<{
   env: NodeJS.ProcessEnv;
   homeDir: string;
   xdgDir: string;
@@ -571,14 +651,27 @@ async function makeSmokeEnvironment(root: string, serverPort: number): Promise<{
 }> {
   const homeDir = join(root, "home");
   const xdgDir = join(root, "xdg");
+  const xdgConfigDir = join(xdgDir, "config");
+  const xdgDataDir = join(xdgDir, "data");
+  const xdgCacheDir = join(xdgDir, "cache");
+  const xdgStateDir = join(xdgDir, "state");
+  const tmpDir = join(root, "tmp");
   const agentDir = join(root, "agent");
   const sessionDir = join(root, "sessions");
-  await Promise.all([homeDir, xdgDir, agentDir, sessionDir].map((directory) => mkdir(directory, { recursive: true })));
+  await Promise.all(
+    [homeDir, xdgConfigDir, xdgDataDir, xdgCacheDir, xdgStateDir, tmpDir, agentDir, sessionDir].map((directory) =>
+      mkdir(directory, { recursive: true }),
+    ),
+  );
 
   const env = {
     ...cleanInheritedEnvironment(),
     HOME: homeDir,
-    XDG_CONFIG_HOME: xdgDir,
+    TMPDIR: tmpDir,
+    XDG_CONFIG_HOME: xdgConfigDir,
+    XDG_DATA_HOME: xdgDataDir,
+    XDG_CACHE_HOME: xdgCacheDir,
+    XDG_STATE_HOME: xdgStateDir,
     PI_CODING_AGENT_DIR: agentDir,
     PI_CODING_AGENT_SESSION_DIR: sessionDir,
     PI_OFFLINE: "1",
@@ -586,8 +679,6 @@ async function makeSmokeEnvironment(root: string, serverPort: number): Promise<{
     PI_TELEMETRY: "0",
     PI_TRUE_COLOR: "0",
     TERM: "xterm-256color",
-    PI_INPUT_LOCK: "1",
-    SMOKE_MOCK_PORT: String(serverPort),
   };
   return { env, homeDir, xdgDir, agentDir, sessionDir };
 }
@@ -632,19 +723,7 @@ async function writeMockConfiguration(agentDir: string, candidateDir: string, po
 }
 
 function buildPtyCommand(candidateIndex: string, env: NodeJS.ProcessEnv): string {
-  const forwardedKeys = [
-    "HOME",
-    "XDG_CONFIG_HOME",
-    "PI_CODING_AGENT_DIR",
-    "PI_CODING_AGENT_SESSION_DIR",
-    "PI_OFFLINE",
-    "PI_SKIP_VERSION_CHECK",
-    "PI_TELEMETRY",
-    "PI_TRUE_COLOR",
-    "TERM",
-    "PI_INPUT_LOCK",
-  ];
-  const envAssignments = forwardedKeys.map((key) => `${key}=${shellQuote(env[key] ?? "")}`);
+  const envAssignments = PTY_ENV_KEYS.map((key) => `${key}=${shellQuote(env[key] ?? "")}`);
   const args = [
     "pnpm",
     "exec",
@@ -659,7 +738,7 @@ function buildPtyCommand(candidateIndex: string, env: NodeJS.ProcessEnv): string
     "off",
     "--no-session",
   ].map(shellQuote);
-  return [`stty rows ${PTY_ROWS} cols ${PTY_COLS} && exec env`, ...envAssignments, ...args].join(" ");
+  return [`stty rows ${PTY_ROWS} cols ${PTY_COLS} && exec env -i`, ...envAssignments, ...args].join(" ");
 }
 
 async function checkVersion(env: NodeJS.ProcessEnv): Promise<void> {
@@ -700,8 +779,9 @@ async function readCommandVersion(command: string, args: string[], label: string
       env: cleanInheritedEnvironment(),
       timeoutMs: TIMEOUTS.version,
     });
-  } catch {
-    throw new SmokeFailure("environment", `${label} version`, `could not run the ${label} version command`);
+  } catch (error) {
+    const detail = error instanceof Error ? `: ${error.message}` : "";
+    throw new SmokeFailure("environment", `${label} version`, `could not run the ${label} version command${detail}`);
   }
   const lines = `${result.stdout}\n${result.stderr}`
     .split(/\r?\n/)
@@ -833,11 +913,6 @@ async function runTier1AndTier2(
 
     await sendCommand(
       "disabled-status",
-      "/input-lock disable",
-      /Input lock disabled/,
-    );
-    await sendCommand(
-      "disabled-status",
       "/input-lock status",
       /Enabled:\s*no[\s\S]{0,300}State:\s*IDLE[\s\S]{0,300}Agent:\s*inactive/,
     );
@@ -929,7 +1004,7 @@ async function main(): Promise<void> {
     server = new MockCompletionServer();
     mockServerForDiagnostics = server;
     await server.start();
-    const smoke = await makeSmokeEnvironment(tempRoot, server.port);
+    const smoke = await makeSmokeEnvironment(tempRoot);
     await writeMockConfiguration(smoke.agentDir, candidateDir, server.port);
     await checkVersion(smoke.env);
     await logSafeEnvironment(candidateDir);

@@ -52,6 +52,8 @@ const INHERITED_ENV_KEYS = [
   "HOME",
   "TMPDIR",
   "TERM",
+  // pnpm aborts interactive prompts without a TTY unless CI=true.
+  "CI",
   "LANG",
   "LANGUAGE",
   "LC_ALL",

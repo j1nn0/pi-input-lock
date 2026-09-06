@@ -29,3 +29,24 @@ jobs:
         run: pnpm test
       - name: Pack check
         run: pnpm pack:check
+
+  pty-smoke:
+    name: PTY Smoke
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/setup@v2
+        with:
+          install: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Version reporting
+        run: pnpm exec pi --version
+      - name: PTY smoke
+        run: pnpm smoke:pty

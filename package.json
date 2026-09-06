@@ -40,7 +40,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit -p tsconfig.json",
-    "pack:check": "pnpm pack --pack-destination /tmp"
+    "pack:check": "pnpm pack --pack-destination /tmp",
+    "smoke:pty": "node scripts/pty-smoke.ts"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "0.85.1",

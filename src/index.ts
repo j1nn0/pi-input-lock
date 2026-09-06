@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: MIT
  */
 import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { CURSOR_MARKER, isKeyRelease, isKeyRepeat, matchesKey, visibleWidth, type TUI } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, isKeyRelease, isKeyRepeat, matchesKey, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 
 type EditorFactory = (tui: TUI, theme: any, keybindings: any) => any;
 
@@ -392,7 +392,10 @@ export class LockedEditor extends CustomEditor {
     const text = this.showHint ? `🔒 WATCH · ${getActiveToggleLabel()} to interact` : "🔒 WATCH";
     const label = this.accent(text);
     const left = Math.max(0, Math.floor((width - visibleWidth(label)) / 2));
-    const line = " ".repeat(left) + label;
+    const line =
+      visibleWidth(label) > width
+        ? truncateToWidth(label, width, "", false)
+        : " ".repeat(left) + label;
     // Anchor the hidden write cursor at column 0 of the stable centered row
     // while this surface owns focus. CURSOR_MARKER is a zero-width APC that
     // visibleWidth strips, so the centering above is unaffected.

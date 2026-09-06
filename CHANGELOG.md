@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.1.10] - 2026-09-06
+
+- Prevent WATCH rendering from exceeding narrow terminal widths and crashing Pi TUI.
+
 ## [0.1.9] - 2026-09-06
 
 - Add Pi 0.85.x compatibility support and a separate minimum/latest compatibility CI workflow.

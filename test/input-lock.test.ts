@@ -575,12 +575,24 @@ describe("locked editor", () => {
     ).toBe(false);
   });
 
-  it("handles widths smaller than the prompt", () => {
-    const editor = new LockedEditor({} as any, theme, {});
+  it.each([5, 10, 36, 37, 60])(
+    "keeps every rendered line within width %i",
+    (width) => {
+      const editor = new LockedEditor({} as any, theme, {});
+      const lines = editor.render(width);
 
-    expect(() => editor.render(10)).not.toThrow();
-    expect(editor.render(10)).toHaveLength(3);
-  });
+      expect(lines).toHaveLength(3);
+      for (const line of lines) {
+        expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+      }
+
+      if (width === 37) {
+        const label = "🔒 WATCH · Ctrl + Alt + I to interact";
+        expect(visibleWidth(lines[1] ?? "")).toBe(37);
+        expect((lines[1] ?? "").slice(CURSOR_MARKER.length)).toBe(label);
+      }
+    },
+  );
 
   it("uses the configured shortcut in the prompt", () => {
     const previousHome = process.env.HOME;

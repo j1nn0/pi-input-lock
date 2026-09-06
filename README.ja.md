@@ -32,7 +32,7 @@ export PI_INPUT_LOCK=1
 - `/input-lock enable`: ロックを有効にする。
 - `/input-lock disable`: ロックを無効にする。
 - `/input-lock status`: 有効/無効状態とロックの情報を確認する（状態は変更しない）。
-- `/lock enable`、`/lock disable`、`/lock status`: 上記のエイリアス。
+- `/lock` は `/input-lock` の非推奨互換エイリアスです。v0.2.0 で削除します。
 
 実行中の切り替えは現在の Pi プロセスにだけ有効です。再起動すると、`PI_INPUT_LOCK` から起動時の状態を改めて決定します。
 
@@ -62,8 +62,8 @@ export PI_INPUT_LOCK=1
 以前のパスである `~/.pi/agent/extensions/pi-input-lock/config.json` も引き続き読み込めます。
 両方のファイルがある場合は新しい方を優先し、2つの設定を組み合わせて読み込むことはありません。
 
-`WATCH`/`OVERRIDE` 中は `/input-lock` または `/lock`（引数なし）でも切り替えできます。エージェント停止中に手動の `WATCH` を ON/OFF するには、設定した切替キーを使ってください。
-`/input-lock status` で、有効/無効状態、現在の状態、エージェントの実行状態、解除ポリシー、ツール出力の展開設定、切替キーを確認できます。状態は変更されません。`/lock status` も利用できます。
+`WATCH`/`OVERRIDE` 中は `/input-lock`（引数なし）でも切り替えできます。エージェント停止中に手動の `WATCH` を ON/OFF するには、設定した切替キーを使ってください。
+`/input-lock status` で、有効/無効状態、現在の状態、エージェントの実行状態、解除ポリシー、ツール出力の展開設定、切替キーを確認できます。状態は変更されません。
 
 動作状態は次の3つです。
 

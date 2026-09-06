@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.9] - 2026-09-06
+
+- Add Pi 0.85.x compatibility support and a separate minimum/latest compatibility CI workflow.
+- Make `/input-lock` the canonical command and deprecate `/lock`; the alias will be removed in v0.2.0.
+
 ## [0.1.8] - 2026-09-05
 
 - Add runtime enable/disable via `/input-lock enable` and `/input-lock disable` (with `/lock` aliases).

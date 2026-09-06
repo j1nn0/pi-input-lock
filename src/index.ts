@@ -985,7 +985,7 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.notify("Input lock disabled", "info");
   };
 
-  const cmdHandler = async (args: string, ctx: ExtensionContext): Promise<void> => {
+  const inputLockCommandHandler = async (args: string, ctx: ExtensionContext): Promise<void> => {
     const command = typeof args === "string" ? args.trim().toLowerCase() : "";
     if (command === "status") {
       const agentIdle = contextIsIdle(ctx);
@@ -1017,13 +1017,20 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.notify(lockState === "WATCH" ? `Input locked (${label})` : "Input unlocked", "info");
   };
 
+  const DEPRECATED_LOCK_NOTICE = "/lock is deprecated and will be removed in v0.2.0. Use /input-lock instead.";
+
+  const deprecatedLockCommandHandler = async (args: string, ctx: ExtensionContext): Promise<void> => {
+    ctx.ui.notify(DEPRECATED_LOCK_NOTICE, "info");
+    await inputLockCommandHandler(args, ctx);
+  };
+
   pi.registerCommand("input-lock", {
     description: "Manage the Pi input safety lock",
-    handler: cmdHandler,
+    handler: inputLockCommandHandler,
   });
   pi.registerCommand("lock", {
-    description: "Manage the Pi input safety lock",
-    handler: cmdHandler,
+    description: "Deprecated alias of /input-lock (removed in v0.2.0)",
+    handler: deprecatedLockCommandHandler,
   });
 
 }

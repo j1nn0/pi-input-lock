@@ -1,0 +1,92 @@
+name: Pi Compatibility
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  minimum:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    name: Minimum Pi compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/setup@v2
+        with:
+          install: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: pnpm
+      - name: Prepare compatibility copy
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/compat-min"
+          mkdir -p "$RUNNER_TEMP/compat-min"
+          cp -a "$GITHUB_WORKSPACE/." "$RUNNER_TEMP/compat-min/"
+      - name: Install minimum supported Pi dependencies
+        working-directory: ${{ runner.temp }}/compat-min
+        run: pnpm add -D @earendil-works/pi-ai@0.84.2 @earendil-works/pi-coding-agent@0.84.2 @earendil-works/pi-tui@0.84.2 --config.minimumReleaseAge=0
+      - name: Report resolved Pi versions
+        working-directory: ${{ runner.temp }}/compat-min
+        run: |
+          set -euo pipefail
+          pnpm list --depth 0
+          node -e 'const fs = require("node:fs"); for (const name of ["@earendil-works/pi-ai", "@earendil-works/pi-coding-agent", "@earendil-works/pi-tui"]) { const version = JSON.parse(fs.readFileSync(`node_modules/${name}/package.json`, "utf8")).version; console.log(`${name}@${version}`); }'
+      - name: Typecheck
+        working-directory: ${{ runner.temp }}/compat-min
+        env:
+          PNPM_CONFIG_MINIMUM_RELEASE_AGE: '0'
+        run: pnpm check
+      - name: Test
+        working-directory: ${{ runner.temp }}/compat-min
+        env:
+          PNPM_CONFIG_MINIMUM_RELEASE_AGE: '0'
+        run: pnpm test
+
+  latest:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: Latest Pi compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/setup@v2
+        with:
+          install: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: pnpm
+      - name: Prepare compatibility copy
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/compat-latest"
+          mkdir -p "$RUNNER_TEMP/compat-latest"
+          cp -a "$GITHUB_WORKSPACE/." "$RUNNER_TEMP/compat-latest/"
+      - name: Install latest Pi dependencies
+        working-directory: ${{ runner.temp }}/compat-latest
+        run: pnpm add -D @earendil-works/pi-ai@latest @earendil-works/pi-coding-agent@latest @earendil-works/pi-tui@latest --config.minimumReleaseAge=0
+      - name: Report resolved Pi versions
+        working-directory: ${{ runner.temp }}/compat-latest
+        run: |
+          set -euo pipefail
+          pnpm list --depth 0
+          node -e 'const fs = require("node:fs"); for (const name of ["@earendil-works/pi-ai", "@earendil-works/pi-coding-agent", "@earendil-works/pi-tui"]) { const version = JSON.parse(fs.readFileSync(`node_modules/${name}/package.json`, "utf8")).version; console.log(`${name}@${version}`); }'
+      - name: Typecheck
+        working-directory: ${{ runner.temp }}/compat-latest
+        env:
+          PNPM_CONFIG_MINIMUM_RELEASE_AGE: '0'
+        run: pnpm check
+      - name: Test
+        working-directory: ${{ runner.temp }}/compat-latest
+        env:
+          PNPM_CONFIG_MINIMUM_RELEASE_AGE: '0'
+        run: pnpm test

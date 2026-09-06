@@ -26,6 +26,8 @@ type EditorFactory = (tui: any, theme: any, keybindings: any) => any;
 
 type Harness = ReturnType<typeof makeHarness>;
 
+const DEPRECATED_LOCK_NOTICE = "/lock is deprecated and will be removed in v0.2.0. Use /input-lock instead.";
+
 function makeHarness(initialFactory?: EditorFactory, initialComponent?: any, initialText = "draft prompt") {
   const handlers = new Map<string, Function>();
   const commands: Array<{ name: string; description?: string; handler: Function }> = [];
@@ -1039,9 +1041,12 @@ describe("runtime activation", () => {
       expect(harness.pi.registerCommand).toHaveBeenCalledTimes(2);
       expect(harness.commands.map(({ name, description }) => ({ name, description }))).toEqual([
         { name: "input-lock", description: "Manage the Pi input safety lock" },
-        { name: "lock", description: "Manage the Pi input safety lock" },
+        { name: "lock", description: "Deprecated alias of /input-lock (removed in v0.2.0)" },
       ]);
-      expect(harness.commands[1]!.handler).toBe(harness.commands[0]!.handler);
+      expect(harness.commands[1]!.handler).not.toBe(harness.commands[0]!.handler);
+      await harness.commands[1]!.handler("status", harness.ctx);
+      expect(harness.ui.notify).toHaveBeenNthCalledWith(1, DEPRECATED_LOCK_NOTICE, "info");
+      expect(harness.ui.notify).toHaveBeenNthCalledWith(2, expect.stringContaining("State: IDLE"), "info");
       expect(harness.terminalListenerInstalled).toBe(false);
 
       harness.idle = false;
@@ -1316,6 +1321,7 @@ describe("runtime activation", () => {
 
         await startExtension(harness);
         await harness.commands[1]!.handler("enable", harness.ctx);
+        expect(harness.ui.notify).toHaveBeenCalledWith(DEPRECATED_LOCK_NOTICE, "info");
         expect(harness.component).toBeInstanceOf(LockedEditor);
         expect(harness.activeInputHandlers.size).toBe(1);
 
@@ -1467,11 +1473,12 @@ describe("command status", () => {
         await withEnabled(async () => {
           const harness = makeHarness();
           await startExtension(harness);
-          expect(harness.commands[1]!.handler).toBe(harness.commands[0]!.handler);
+          expect(harness.commands[1]!.handler).not.toBe(harness.commands[0]!.handler);
 
           await harness.commands[1]!.handler("status", harness.ctx);
+          expect(harness.ui.notify).toHaveBeenNthCalledWith(1, DEPRECATED_LOCK_NOTICE, "info");
 
-          expect(harness.ui.notify).toHaveBeenCalledTimes(1);
+          expect(harness.ui.notify).toHaveBeenCalledTimes(2);
           expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Unlock policy: manual"), "info");
           expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Tool expand: enabled"), "info");
           expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Toggle: Ctrl + X"), "info");
@@ -1525,6 +1532,126 @@ describe("command status", () => {
       await handler("bogus", harness.ctx);
       expect(harness.component).toBeInstanceOf(LockedEditor);
       expect(harness.activeInputHandlers.size).toBe(1);
+    });
+  });
+
+
+  it("keeps canonical /input-lock commands free of deprecation notices", async () => {
+    await withDisabled(async () => {
+      const factory: EditorFactory = () => ({ name: "editor", getText: () => "" });
+      const harness = makeHarness(factory, { name: "editor", getText: () => "" }, "canonical commands draft");
+      await startExtension(harness);
+
+      await harness.commands[0]!.handler("enable", harness.ctx);
+      await harness.commands[0]!.handler("status", harness.ctx);
+      await harness.commands[0]!.handler("disable", harness.ctx);
+
+      expect(harness.ui.notify.mock.calls.filter(([message]: [unknown]) => message === DEPRECATED_LOCK_NOTICE)).toHaveLength(0);
+      expect(harness.ui.notify).toHaveBeenCalledWith("Input lock enabled", "info");
+      expect(harness.ui.notify).toHaveBeenCalledWith(expect.stringContaining("State: IDLE"), "info");
+      expect(harness.ui.notify).toHaveBeenCalledWith("Input lock disabled", "info");
+    });
+  });
+
+  it("keeps /lock enable behavior while notifying deprecation", async () => {
+    await withDisabled(async () => {
+      const factory: EditorFactory = () => ({ name: "editor", getText: () => "" });
+      const harness = makeHarness(factory, { name: "editor", getText: () => "" }, "deprecated enable draft");
+      harness.idle = false;
+      await startExtension(harness);
+
+      await harness.commands[1]!.handler(" enable ", harness.ctx);
+
+      expect(harness.ui.notify).toHaveBeenNthCalledWith(1, DEPRECATED_LOCK_NOTICE, "info");
+      expect(harness.ui.notify).toHaveBeenNthCalledWith(2, "Input lock enabled", "info");
+      expect(harness.component).toBeInstanceOf(LockedEditor);
+      expect(harness.activeInputHandlers.size).toBe(1);
+      expect(harness.terminalListenerInstalled).toBe(true);
+    });
+  });
+
+  it("keeps /lock disable behavior while notifying deprecation", async () => {
+    await withEnabled(async () => {
+      const factory: EditorFactory = () => ({ name: "editor", getText: () => "" });
+      const harness = makeHarness(factory, { name: "editor", getText: () => "" }, "deprecated disable draft");
+      harness.idle = false;
+      await startExtension(harness);
+      await agentStart(harness);
+      expect(harness.component).toBeInstanceOf(LockedEditor);
+
+      await harness.commands[1]!.handler(" disable ", harness.ctx);
+
+      expect(harness.ui.notify).toHaveBeenNthCalledWith(1, DEPRECATED_LOCK_NOTICE, "info");
+      expect(harness.ui.notify).toHaveBeenNthCalledWith(2, "Input lock disabled", "info");
+      expect(harness.component).not.toBeInstanceOf(LockedEditor);
+      expect(harness.componentFactory).toBe(factory);
+      expect(harness.editorText).toBe("deprecated disable draft");
+      expect(harness.activeInputHandlers.size).toBe(0);
+      expect(harness.terminalListenerInstalled).toBe(false);
+    });
+  });
+
+  it("keeps /lock without arguments on the canonical toggle path", async () => {
+    await withEnabled(async () => {
+      const factory: EditorFactory = () => ({ name: "editor", getText: () => "" });
+      const harness = makeHarness(factory, { name: "editor", getText: () => "" }, "deprecated no-arg draft");
+      harness.idle = false;
+      await startExtension(harness);
+      await agentStart(harness);
+
+      await harness.commands[1]!.handler("", harness.ctx);
+
+      expect(harness.ui.notify).toHaveBeenNthCalledWith(1, DEPRECATED_LOCK_NOTICE, "info");
+      expect(harness.ui.notify).toHaveBeenNthCalledWith(2, "Input unlocked", "info");
+      expect(harness.component).not.toBeInstanceOf(LockedEditor);
+      expect(harness.activeInputHandlers.size).toBe(0);
+      expect(harness.terminalListenerInstalled).toBe(true);
+    });
+  });
+
+  it("keeps bogus /lock arguments on the canonical toggle path", async () => {
+    await withEnabled(async () => {
+      const factory: EditorFactory = () => ({ name: "editor", getText: () => "" });
+      const harness = makeHarness(factory, { name: "editor", getText: () => "" }, "deprecated bogus draft");
+      harness.idle = false;
+      await startExtension(harness);
+      await agentStart(harness);
+
+      await harness.commands[1]!.handler("bogus", harness.ctx);
+
+      expect(harness.ui.notify).toHaveBeenNthCalledWith(1, DEPRECATED_LOCK_NOTICE, "info");
+      expect(harness.ui.notify).toHaveBeenNthCalledWith(2, "Input unlocked", "info");
+      expect(harness.component).not.toBeInstanceOf(LockedEditor);
+      expect(harness.activeInputHandlers.size).toBe(0);
+      expect(harness.terminalListenerInstalled).toBe(true);
+    });
+  });
+
+  it("keeps /lock status read-only while adding its deprecation notice", async () => {
+    await withEnabled(async () => {
+      const factory: EditorFactory = () => ({ name: "editor", getText: () => "" });
+      const harness = makeHarness(factory, { name: "editor", getText: () => "" }, "deprecated status draft");
+      harness.idle = false;
+      await startExtension(harness);
+      await agentStart(harness);
+      const component = harness.component;
+      const componentFactory = harness.componentFactory;
+      const editorText = harness.editorText;
+      const activeHandlers = harness.activeInputHandlers.size;
+      const terminalListenerInstalled = harness.terminalListenerInstalled;
+      const setEditorCalls = harness.setEditorComponent.mock.calls.length;
+
+      await harness.commands[1]!.handler("status", harness.ctx);
+
+      expect(harness.ui.notify).toHaveBeenCalledTimes(2);
+      expect(harness.ui.notify).toHaveBeenNthCalledWith(1, DEPRECATED_LOCK_NOTICE, "info");
+      expect(harness.ui.notify).toHaveBeenNthCalledWith(2, expect.stringContaining("State: WATCH"), "info");
+      expect(harness.component).toBe(component);
+      expect(harness.componentFactory).toBe(componentFactory);
+      expect(harness.editorText).toBe(editorText);
+      expect(harness.activeInputHandlers.size).toBe(activeHandlers);
+      expect(harness.terminalListenerInstalled).toBe(terminalListenerInstalled);
+      expect(harness.setEditorComponent.mock.calls.length).toBe(setEditorCalls);
     });
   });
 });

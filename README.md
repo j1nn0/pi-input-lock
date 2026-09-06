@@ -35,7 +35,7 @@ The extension also loads when `PI_INPUT_LOCK` is unset. Runtime controls are:
 - `/input-lock enable` enables the lock for the current Pi process.
 - `/input-lock disable` disables the lock for the current Pi process.
 - `/input-lock status` reports the current enabled state and lock details without changing them.
-- `/lock enable`, `/lock disable`, and `/lock status` are aliases.
+- `/lock` is a deprecated compatibility alias for `/input-lock`. It will be removed in v0.2.0.
 
 Runtime changes last only for the current Pi process. After a restart, the startup state is derived from `PI_INPUT_LOCK` again.
 
@@ -70,9 +70,9 @@ Configuration is cached for the lifetime of the process; restart Pi after changi
 legacy fallback, but `~/.pi/agent/pi-input-lock.json` is the canonical user
 config and wins when both files exist (settings are never merged).
 
-`WATCH`/`OVERRIDE`: `/input-lock` or `/lock` also toggles. To turn manual `WATCH`
+`WATCH`/`OVERRIDE`: `/input-lock` also toggles. To turn manual `WATCH`
 on/off while the agent is stopped, use the configured toggle key.
-`/input-lock status` reports the current lock state, agent activity, unlock policy, tool-expand setting, and toggle key without changing the lock state. `/lock status` is also supported.
+`/input-lock status` reports the current lock state, agent activity, unlock policy, tool-expand setting, and toggle key without changing the lock state.
 
 States are lifecycle-aware:
 

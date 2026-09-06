@@ -3,4 +3,5 @@ packages:
 
 allowBuilds:
   "@google/genai": true
+  esbuild: false
   protobufjs: true

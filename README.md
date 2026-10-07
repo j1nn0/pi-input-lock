@@ -1,3 +1,14 @@
+> [!IMPORTANT]
+> This repository has moved to the [`j1nn0/pi-extensions`](https://github.com/j1nn0/pi-extensions) monorepo.
+>
+> Active development, issues, and releases are now maintained at
+> [`packages/pi-input-lock`](https://github.com/j1nn0/pi-extensions/tree/main/packages/pi-input-lock).
+>
+> The npm package name has not changed:
+> `pi install npm:@j1nn0/pi-input-lock`
+>
+> This standalone repository is archived and kept for historical reference.
+
 # @j1nn0/pi-input-lock
 
 A small Pi extension that protects interactive input while an agent is running.
@@ -51,7 +62,7 @@ A recommended combined configuration:
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/j1nn0/pi-input-lock/main/pi-input-lock.schema.json",
+  "$schema": "https://raw.githubusercontent.com/j1nn0/pi-extensions/main/packages/pi-input-lock/pi-input-lock.schema.json",
   "toggleKey": "ctrl+alt+i",
   "allowToolExpandInWatch": true,
   "unlockPolicy": "manual"
